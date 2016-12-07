@@ -1,9 +1,7 @@
-
+"""
+"""
 # Based on Dave Lassalle's (@superponible) firefox volatility plugins:
 #     https://github.com/superponible/volatility-plugins
-
-#
-# https://www.sqlite.org/fileformat2.html#record_format
 
 from volatility.scan import BaseScanner
 from volatility.commands import Command
@@ -16,10 +14,10 @@ import yara
 
 import sqlitetools
 
-class Sqlite3Find(Command):
+class SqliteFind(Command):
 
     def __init__(self, config, *args, **kwargs):
-        super(Sqlite3Find, self).__init__(config, *args, **kwargs)
+        super(SqliteFind, self).__init__(config, *args, **kwargs)
         config.add_option('COL-TYPES', short_option='c', default=None,
             help='Descriptor of types each column can have') # TODO: Better help
 
@@ -29,7 +27,6 @@ class Sqlite3Find(Command):
 
         address_space = utils.load_as(self._config, astype="physical")
         col_type_descriptors = self._config.COL_TYPES.split(';')
-        yara_rule, header_pos = sqlitetools.get_header_search_pattern(col_type_descriptors)
 
         searcher = sqlitetools.SqliteRecordSearch(col_type_descriptors)
         for address, types, values in searcher.find_records(address_space):

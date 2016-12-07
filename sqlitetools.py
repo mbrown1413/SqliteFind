@@ -17,13 +17,19 @@ The sqlite format is described here:
     https://www.sqlite.org/fileformat2.html
 
 """
+
+# Terms used in implementation:
+#   type set - A set that describes what possible types of a column. Each item
+#              in the set is either a serial type integer or "string" or
+#              "blob".
+
 #TODO: Consider using the python bitsting library.
 
 import struct
+from collections import namedtuple
 
 import yara  #TODO: Make yara optional
-
-import volatility
+import volatility  #TODO: Make volatility optional
 
 
 class SqliteParseError(Exception):
@@ -105,26 +111,26 @@ def parse_record(buf, start=0, n_cols=None, type_sets=None):
         raise SqliteParseError("Expected {} columns, got "
                                "{}".format(n_cols, len(serial_types)))
 
-    # Check: type_sets
-    if type_sets is not None:
-        for n, (serial_type, type_set) in enumerate(zip(serial_types, type_sets)):
-            if type_set is None:
-                continue
-            if "string" in type_set and serial_type >= 13 and serial_type & 1 == 0:
-                continue
-            if "blob" in type_set and serial_type >= 12 and serial_type & 1 == 1:
-                continue
-            if serial_type not in type_set:
-                raise SqliteParseError("Serial type for col {} was {}, not "
-                        "one of the expected {}".format(n, serial_type,
-                                                        expected_type))
-
     # Parse columns
     values = []
     for stype in serial_types:
         value, l = parse_col_value(stype, buf, i)
         i += l
         values.append(value)
+
+    # Check: type_sets
+    if type_sets is not None:
+        for n, (serial_type, type_set) in enumerate(zip(serial_types, type_sets)):
+            if type_set is None:
+                continue
+            if "blob" in type_set and serial_type >= 12 and serial_type & 1 == 0:
+                continue
+            if "string" in type_set and serial_type >= 13 and serial_type & 1 == 1:
+                continue
+            if serial_type not in type_set:
+                raise SqliteParseError("Serial type for col {} was {}, not "
+                        "one of the expected {}".format(n, serial_type,
+                                                        type_set))
 
     # Check: payload length
     # Subtract -3 since payload_len does not include B-Tree Leaf Cell header,
@@ -147,7 +153,10 @@ def count_varints(buf, start=0, n=1, backward=False):
 
     `SqliteParseError` may be raised if the varints are not valid in some way.
     """
-    assert n > 0
+    if n < 0:
+        n = -n
+        backward = not backward
+
     if not backward: raise NotImplementedError()  #TODO
 
     pos = start
@@ -300,14 +309,19 @@ def parse_col_value(serial_type, buf, start=0):
 ########## Searching ###########
 ################################
 
+Needle = namedtuple("Needle", "yara_rule varint_offset byte_offset")
+
 class SqliteRecordSearch(object):
 
-    def __init__(self, col_type_descriptors):
-        self.col_type_descriptors = col_type_descriptors
+    def __init__(self, col_type_strs):
+        self.col_type_strs = col_type_strs
 
-        rule, header_pos = get_header_search_pattern(col_type_descriptors)
-        self.rule = rule
-        self.header_pos = header_pos
+        self.type_sets = [_parse_type_str(s) for s in col_type_strs]
+        self.needle = _get_search_needle(self.type_sets)
+
+    @property
+    def n_cols(self):
+        return len(self.type_sets)
 
     def find_records(self, haystack):
         if isinstance(haystack, volatility.addrspace.BaseAddressSpace):
@@ -319,39 +333,29 @@ class SqliteRecordSearch(object):
         raise NotImplementedError()  #TODO
 
     def _find_record_in_address_space(self, address_space):
-        for buf, offset, absolute_offset in yara_search_address_space(address_space, self.rule):
+        for buf, offset, absolute_offset in _search_addr_space(address_space, self.needle.yara_rule):
             try:
 
-                # Count back through varints until we get to the beginning
-                # of the record payload. Our search puts us header_pos
-                # varints into the header, and there is a row ID and
-                # payload length before the header, so we count back
-                # header_pos+2 to get to the payload_len field at the
-                # beginning of the record.
-                # Also count back one byte for the B-Tree Lead Cell header
-                record_start = count_varints(buf, offset, self.header_pos+3, backward=True) - 1
+                # Count back a number of varints and bytes according to needle
+                record_start = count_varints(buf, offset, self.needle.varint_offset) + self.needle.byte_offset
 
-                types, values = parse_record(buf, record_start, n_cols=len(self.col_type_descriptors))
+                types, values = parse_record(buf, record_start, self.n_cols, self.type_sets)
                 yield absolute_offset, types, values
 
             except SqliteParseError as e:
                 pass  # Match is not an actual record  :(
 
-def get_header_search_pattern(col_type_descriptors):
-    possible_serial_types_by_col = []
-    for type_str in col_type_descriptors:
-        serial_types = _type_str_to_serial_types(type_str)
-        possible_serial_types_by_col.append(serial_types)
-
-    viable_cols = map(lambda c: None not in c, possible_serial_types_by_col)
-    start, length = _longest_run(viable_cols)
+def _get_search_needle(type_sets):
+    can_use_col = lambda c: 'string' not in c and 'blob' not in c
+    usable_cols = map(can_use_col, type_sets)
+    start, length = _longest_run(usable_cols)
 
     if start is None:
         raise NotImplementedError("")
 
     # Build yara hex string
     hex_str = []
-    for types in possible_serial_types_by_col[start:start+length]:
+    for types in type_sets[start:start+length]:
         hex_str.append('(')
 
         type_choices = []
@@ -365,36 +369,43 @@ def get_header_search_pattern(col_type_descriptors):
     rule_str = "rule r1 {{ strings: $a = {{ {} }} condition: $a }}".format(hex_str)
     yara_rule = yara.compile(source=rule_str)
 
-    return yara_rule, start
+    # Our search puts us `start` varints into the header. There are `start`+3
+    # varints (row id, payload length, header length) and one byte (B-Tree leaf
+    # cell header byte) to count back until we get to the start of the cell.
+    return Needle(yara_rule, -start-3, -1)
 
-def _type_str_to_serial_types(type_str):
+def _parse_type_str(type_str):
+    """Takes a type string and returns a type set."""
+    if len(type_str) == 0:
+        raise ValueError('Column type cannot be blank. Use "?" for unknown '
+                         'column types.')
     if type_str is '?':
         return None
 
-    serial_types = set([])
+    type_set = set([])
     for t in type_str.split(','):
         t = t.lower()
         if t == "bool":
             #TODO: Schema format 4 or higher is assumed, make in an option.
             for i in [8, 9]:
-                serial_types.add(i)
+                type_set.add(i)
         elif t == "null":
-            serial_types.add(0)
+            type_set.add(0)
         elif t == 'int':
             for i in [1, 2, 3, 4, 5, 6, 7, 8, 9]:
-                serial_types.add(i)
-        elif t in ('blob', 'str'):
-            serial_types.add(None)
+                type_set.add(i)
+        elif t in ('blob', 'string'):
+            type_set.add(t)
         elif t == "notnull":
-            serial_types.remove(0)
-        elif t.startswith('str'):
+            type_set.remove(0)
+        elif t.startswith('string'):
             raise NotImplementedError()
         elif t == 'timestamp':
             raise NotImplementedError()
         else:
-            debug.error()  #TODO: Error message
+            raise ValueError('Unknown column type "{}"'.format(t))
 
-    return serial_types
+    return type_set
 
 def _longest_run(xs):
     """
@@ -421,9 +432,10 @@ def _longest_run(xs):
 
     return longest_run_start, longest_run_len
 
-def yara_search_address_space(address_space, rule):
+def _search_addr_space(address_space, rule):
     blocksize = 1024 * 1024 * 10
     overlap = 1024
+    match_offsets = set()
 
     # Iterate over each valid run of memory
     for run_pos, run_size in sorted(address_space.get_available_addresses()):
@@ -434,13 +446,14 @@ def yara_search_address_space(address_space, rule):
             to_read = min(blocksize+overlap, run_pos+run_size - pos)
 
             # Read and search
-            #TODO: Remove duplicate matches due to overlapping
             buf = address_space.read(pos, to_read)
             matched_rules = rule.match(data=buf)
             if matched_rules:
                 for str_pos, str_name, str_value in matched_rules[0].strings:
-                    #import ipdb; ipdb.set_trace()
                     absolute_offset = str_pos + pos
+                    if absolute_offset in match_offsets:
+                        continue
+                    match_offsets.add(absolute_offset)
                     yield buf, str_pos, absolute_offset
 
             pos += blocksize
