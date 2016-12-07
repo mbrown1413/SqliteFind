@@ -21,8 +21,18 @@ The sqlite format is described here:
 
 import struct
 
+import yara  #TODO: Make yara optional
+
+import volatility
+
+
 class SqliteParseError(Exception):
     pass
+
+
+###########################################
+########## Parsing And Encoding ###########
+###########################################
 
 def parse_record(buf, start=0, n_cols=None, type_sets=None):
     """
@@ -112,7 +122,7 @@ def parse_record(buf, start=0, n_cols=None, type_sets=None):
     # Parse columns
     values = []
     for stype in serial_types:
-        value, l = parse_column(stype, buf, i)
+        value, l = parse_col_value(stype, buf, i)
         i += l
         values.append(value)
 
@@ -219,7 +229,7 @@ def encode_twos_comp_bits(i, n_bits):
 
     return bin(i)[2:]
 
-def parse_column(serial_type, buf, start=0):
+def parse_col_value(serial_type, buf, start=0):
     """Returns (value of the column, number of bytes the column takes)."""
     # Serial type meanings taken directly from:
     #   https://www.sqlite.org/fileformat2.html#record_format
@@ -284,3 +294,153 @@ def parse_column(serial_type, buf, start=0):
 
     else:
         assert False  # Should never happen
+
+
+################################
+########## Searching ###########
+################################
+
+class SqliteRecordSearch(object):
+
+    def __init__(self, col_type_descriptors):
+        self.col_type_descriptors = col_type_descriptors
+
+        rule, header_pos = get_header_search_pattern(col_type_descriptors)
+        self.rule = rule
+        self.header_pos = header_pos
+
+    def find_records(self, haystack):
+        if isinstance(haystack, volatility.addrspace.BaseAddressSpace):
+            return self._find_record_in_address_space(haystack)
+        else:
+            return self._find_record_in_buf(haystack)
+
+    def _find_record_in_buf(self, buf):
+        raise NotImplementedError()  #TODO
+
+    def _find_record_in_address_space(self, address_space):
+        for buf, offset, absolute_offset in yara_search_address_space(address_space, self.rule):
+            try:
+
+                # Count back through varints until we get to the beginning
+                # of the record payload. Our search puts us header_pos
+                # varints into the header, and there is a row ID and
+                # payload length before the header, so we count back
+                # header_pos+2 to get to the payload_len field at the
+                # beginning of the record.
+                # Also count back one byte for the B-Tree Lead Cell header
+                record_start = count_varints(buf, offset, self.header_pos+3, backward=True) - 1
+
+                types, values = parse_record(buf, record_start, n_cols=len(self.col_type_descriptors))
+                yield absolute_offset, types, values
+
+            except SqliteParseError as e:
+                pass  # Match is not an actual record  :(
+
+def get_header_search_pattern(col_type_descriptors):
+    possible_serial_types_by_col = []
+    for type_str in col_type_descriptors:
+        serial_types = _type_str_to_serial_types(type_str)
+        possible_serial_types_by_col.append(serial_types)
+
+    viable_cols = map(lambda c: None not in c, possible_serial_types_by_col)
+    start, length = _longest_run(viable_cols)
+
+    if start is None:
+        raise NotImplementedError("")
+
+    # Build yara hex string
+    hex_str = []
+    for types in possible_serial_types_by_col[start:start+length]:
+        hex_str.append('(')
+
+        type_choices = []
+        for t in types:
+            type_choices.append(hex(t)[2:].zfill(2))
+        hex_str.append(' | '.join(type_choices))
+
+        hex_str.append(')')
+    hex_str = ' '.join(hex_str)
+
+    rule_str = "rule r1 {{ strings: $a = {{ {} }} condition: $a }}".format(hex_str)
+    yara_rule = yara.compile(source=rule_str)
+
+    return yara_rule, start
+
+def _type_str_to_serial_types(type_str):
+    if type_str is '?':
+        return None
+
+    serial_types = set([])
+    for t in type_str.split(','):
+        t = t.lower()
+        if t == "bool":
+            #TODO: Schema format 4 or higher is assumed, make in an option.
+            for i in [8, 9]:
+                serial_types.add(i)
+        elif t == "null":
+            serial_types.add(0)
+        elif t == 'int':
+            for i in [1, 2, 3, 4, 5, 6, 7, 8, 9]:
+                serial_types.add(i)
+        elif t in ('blob', 'str'):
+            serial_types.add(None)
+        elif t == "notnull":
+            serial_types.remove(0)
+        elif t.startswith('str'):
+            raise NotImplementedError()
+        elif t == 'timestamp':
+            raise NotImplementedError()
+        else:
+            debug.error()  #TODO: Error message
+
+    return serial_types
+
+def _longest_run(xs):
+    """
+    Return start index and length of the longest run in the list `xs` of items
+    that evaluate to True. Return (None, None) if all items are False.
+    """
+    in_run = False
+    run_start = None
+    longest_run_len = None
+    longest_run_start = None
+    for i, x in enumerate(xs):
+
+        if in_run and not x:
+            in_run = False
+        elif not in_run and x:
+            in_run = True
+            run_start = i
+
+        if in_run:
+            run_len = i - run_start + 1
+            if run_len > longest_run_len:
+                longest_run_len = run_len
+                longest_run_start = run_start
+
+    return longest_run_start, longest_run_len
+
+def yara_search_address_space(address_space, rule):
+    blocksize = 1024 * 1024 * 10
+    overlap = 1024
+
+    # Iterate over each valid run of memory
+    for run_pos, run_size in sorted(address_space.get_available_addresses()):
+
+        # Read in blocks to save memory
+        pos = run_pos
+        while pos < run_pos+run_size:
+            to_read = min(blocksize+overlap, run_pos+run_size - pos)
+
+            # Read and search
+            #TODO: Remove duplicate matches due to overlapping
+            buf = address_space.read(pos, to_read)
+            matched_rules = rule.match(data=buf)
+            if matched_rules:
+                for str_pos, str_name, str_value in matched_rules[0].strings:
+                    #import ipdb; ipdb.set_trace()
+                    absolute_offset = str_pos + pos
+                    yield buf, str_pos, absolute_offset
+
+            pos += blocksize
