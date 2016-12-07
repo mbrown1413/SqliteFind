@@ -1,16 +1,55 @@
 """
-Parsing tools for sqlite3 records.
+Parsing tools for sqlite records.
 
-https://www.sqlite.org/fileformat2.html#record_format
+These tools are aimed at reading rows from a database file when parts of the
+file are missing or corrupted. It does not depend on reading the database
+header information, but it it helpful to have prior knowledge about the column
+types.
+
+Limitations:
+
+  * If a record does not fit in one B-Tree leaf cell, it will be either missed
+    or corrupted.
+  * False positives can be found (i.e. data that looks like a row but isn't).
+
+The sqlite format is described here:
+
+    https://www.sqlite.org/fileformat2.html
+
 """
+#TODO: Consider using the python bitsting library.
 
 import struct
 
-class RecordFormatError(Exception):
+class SqliteParseError(Exception):
     pass
 
-def parse_record(buf, start=0, n_cols=None, expected_types=None):
+def parse_record(buf, start=0, n_cols=None, type_sets=None):
+    """
+    Reads a record in `buf` at position `start`. Return a tuple of serial types
+    and a tuple of corresponding values. Many checks are made to validate that
+    the data is indeed a record. If any of these checks fail, a
+    SqliteParseError is raised.
+
+    `start` should point to the start of the B-Tree leaf cell header that
+    contains the record. buf[start] should always be 0x0d.
+
+    If `n_cols` is given, then SqliteParseError is raised if there are not
+    that many columns in the record.
+
+    If `type_sets` is given, it should be a list of sets. Each set corresponds
+    to a set of possible types for each column, or None if no checks are to be
+    made for that column. Values in the set can be an integer serial type (see
+    https://www.sqlite.org/fileformat2.html#record_format) or "string" or
+    "blob". If `type_sets` is shorter than the number of columns, only the
+    first `len(type_sets)` columns are checked for types.
+    """
     i = start  # i always points to the next byte in buf to parse
+
+    # B-Tree Leaf Cell Header byte
+    if ord(buf[i]) == 0x0d:
+        raise SqliteParseError("B-Tree Leaf Cell header 0x0d not present")
+    i += 1
 
     # Payload length
     payload_len, l = parse_varint(buf, i)
@@ -25,17 +64,20 @@ def parse_record(buf, start=0, n_cols=None, expected_types=None):
     header_len, l = parse_varint(buf, i)
     i += l
 
+    # Check: Header length
     if header_len < 2:
-        raise RecordFormatError("Header length {} too small".format(header_len))
+        raise SqliteParseError("Header length {} too small".format(header_len))
     if n_cols is not None:
         # Each varint takes 1 to 9 bytes. There is one varint storing the
         # header length, then one for each column.
         max_header_len = 9 * (1 + n_cols)
         min_header_len = 1 * (1 + n_cols)
         if header_len > max_header_len:
-            raise RecordFormatError("Header length of {} is too long for {} cols".format(header_len, n_cols))
+            raise SqliteParseError("Header length of {} is too long for {} "
+                                   "cols".format(header_len, n_cols))
         if header_len < min_header_len:
-            raise RecordFormatError("Header length of {} too short for {} cols".format(header_len, n_cols))
+            raise SqliteParseError("Header length of {} too short for {} "
+                                   "cols".format(header_len, n_cols))
 
     # Column types
     serial_types = []
@@ -44,15 +86,28 @@ def parse_record(buf, start=0, n_cols=None, expected_types=None):
         i += l
         serial_types.append(stype)
 
+    # Check: Record Length
     if i != header_start + header_len:
-        raise RecordFormatError("Record header was not the correct length.")
+        raise SqliteParseError("Record header was not the correct length.")
+
+    # Check: n_cols
     if n_cols is not None and len(serial_types) != n_cols:
-        raise RecordFormatError("Expected {} columns, got "
-                "{}".format(n_cols, len(serial_types)))
-    if expected_types is not None:
-        for n, (serial_type, expected_type_set) in enumerate(zip(serial_types, expected_types)):
-            if expected_type is not None and serial_type not in expected_type_set:
-                raise RecordFormatError("Serial type for col {} was {}, not one of the expected {}".format(n, serial_type, expected_type))
+        raise SqliteParseError("Expected {} columns, got "
+                               "{}".format(n_cols, len(serial_types)))
+
+    # Check: type_sets
+    if type_sets is not None:
+        for n, (serial_type, type_set) in enumerate(zip(serial_types, type_sets)):
+            if type_set is None:
+                continue
+            if "string" in type_set and serial_type >= 13 and serial_type & 1 == 0:
+                continue
+            if "blob" in type_set and serial_type >= 12 and serial_type & 1 == 1:
+                continue
+            if serial_type not in type_set:
+                raise SqliteParseError("Serial type for col {} was {}, not "
+                        "one of the expected {}".format(n, serial_type,
+                                                        expected_type))
 
     # Parse columns
     values = []
@@ -61,22 +116,36 @@ def parse_record(buf, start=0, n_cols=None, expected_types=None):
         i += l
         values.append(value)
 
-    actual_payload_len = i-(start+2)  # -2 since payload_len does not include payload_len and row_id
-    if actual_payload_len != payload_len:  
-        raise RecordFormatError("Payload length field does not match actual length of payload. payload_len={}, actual length={}".format(payload_len, actual_payload_len))
+    # Check: payload length
+    # Subtract -3 since payload_len does not include B-Tree Leaf Cell header,
+    # payload_len and row_id.
+    #TODO: This assumes the varints payload_len and row_id are 1 byte
+    actual_payload_len = i - header_start
+    if actual_payload_len != payload_len:
+        raise SqliteParseError("Payload length field does not match actual "
+                               "length of payload. payload_len={}, actual "
+                               "length={}".format(payload_len, actual_payload_len))
 
     return serial_types, values
 
-def count_varints(buf, start, n, backward=False):
-    if not backward:
-        raise NotImplementedError()
+def count_varints(buf, start=0, n=1, backward=False):
+    """Start at `start` in `buf` and return `n` varints forward or backward.
+
+    `start` must point to the first byte of a varint already, or if `backward`
+    is True then it must point one byte after a varint ends. Returned is an
+    index into `buf` that is `n` varints backwards or forwards from `start`.
+
+    `SqliteParseError` may be raised if the varints are not valid in some way.
+    """
+    assert n > 0
+    if not backward: raise NotImplementedError()  #TODO
 
     pos = start
     for i in range(n):
         pos -= 1
 
         # If the last byte of a varint has bit 0x80 set, it must be a nine byte
-        # varint. 
+        # varint.
         nine_byte = False
         if ord(buf[pos]) & 0x80:
             nine_byte = True
@@ -87,16 +156,17 @@ def count_varints(buf, start, n, backward=False):
             pos -= 1
 
         if nine_byte and j+1 != 9:
-            raise RecordFormatError("Varint ended with 0x80 bit set but was not 9 bytes.")
+            raise SqliteParseError("Varint ended with 0x80 bit set but was "
+                                   "not 9 bytes.")
 
     return pos
 
 def parse_varint(buf, start=0):
-    """Returns (integer value, size of varint 1-9)."""
+    """Returns (varint integer value, size of varint 1-9)."""
     bits = []
     for i in range(9):
         if start+i >= len(buf):
-            raise RecordFormatError("Ran off end of buffer while reading varint")
+            raise SqliteParseError("Ran off end of buffer while reading varint")
         byte = ord(buf[start+i])
 
         # Lower 7 bits are part of the int value
@@ -112,11 +182,12 @@ def parse_varint(buf, start=0):
     return twos_comp(x, 64), i+1
 
 def encode_varint(i):
+    """Return string of bytes encoding `i` into a varint."""
     varint_bits = []
     i_bits = encode_twos_comp_bits(i, 64)
 
     if len(i_bits) > 7:
-        raise NotImplementedError()
+        raise NotImplementedError()  #TODO
 
     return chr(int('0' + i_bits, 2))
 
@@ -127,6 +198,7 @@ def twos_comp(uint, n_bits):
         return uint  # Positive
 
 def parse_twos_comp_bytes(buf, n_bits=None):
+    """Return the integer represented in two's compliment in `buf`."""
     if n_bits is None:
         n_bits = len(buf)*8
 
@@ -137,16 +209,15 @@ def parse_twos_comp_bytes(buf, n_bits=None):
     return twos_comp(num, n_bits)
 
 def encode_twos_comp_bits(i, n_bits):
+    """Return the bits in two's compliment format of the signed integer `i`."""
     negative = False
     if i < 0:
-        #TODO
-        raise NotImplementedError()
+        raise NotImplementedError()  #TODO
 
     if i >= (1 << (n_bits - 1)):
         raise ValueError("{} too large for {}-bit int".format(i, n_bits))
 
     return bin(i)[2:]
-          
 
 def parse_column(serial_type, buf, start=0):
     """Returns (value of the column, number of bytes the column takes)."""
@@ -155,7 +226,7 @@ def parse_column(serial_type, buf, start=0):
 
     def len_check(l):
         if l > len(buf)-start:
-            raise RecordFormatError("Tried to read column value off end of buffer.")
+            raise SqliteParseError("Tried to read column value off end of buffer.")
 
     if serial_type == 0:  # NULL type
         return None, 0
@@ -195,7 +266,7 @@ def parse_column(serial_type, buf, start=0):
         return 1, 0
 
     elif serial_type in (10, 11):  # Not used. Reserved for expansion.
-        raise RecordFormatError("Reserved serial_type {} used".format(serial_type))
+        raise SqliteParseError("Reserved serial_type {} used".format(serial_type))
 
     elif serial_type & 0x1 == 0:  # N>=12 and even.
         #TODO: BLOB that is (N-12)/2 bytes in length
