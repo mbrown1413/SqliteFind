@@ -16,6 +16,10 @@ import yara
 
 import sqlitetools
 
+PREDEFINED_TABLES = {
+    "firefox_cookies": "id:int,null; baseDomain:string; originAttributes:string; name:string; value:string; host:string; path:string; expiry:int; lastAccessed:int; creationTime:int; isSecure:bool; isHttpOnly:bool; appId:int; inBrowserElement:bool",
+}
+
 class SqliteFind(Command):
 
     def __init__(self, config, *args, **kwargs):
@@ -24,6 +28,18 @@ class SqliteFind(Command):
             help='Descriptor of types each column can have') # TODO: Better help
         config.add_option('OUTPUT-STYLE', short_option='O', default="values",
             help='What fields to include in the output. Comma separated list of any of the values: "all_values" - all of the row\'s values in one field; "values" - Row\'s values in separate fields; "address" - Address of row in memory; "all_types" - List of all serial types in one field.')
+        config.add_option('PREDEFINED-TABLE', short_option="P", default=None,
+            choices=PREDEFINED_TABLES.keys(),
+            help='Choose column types from a set of predefined tables. Use this instead of "-c" if the table you are searching for is already predefined.')
+
+    @property
+    def col_types_str(self):
+        if self._config.COL_TYPES and self._config.PREDEFINED_TABLE:
+            debug.error("Cannot use both -c and -P.")
+        if self._config.COL_TYPES is not None:
+            return self._config.COL_TYPES
+        if self._config.PREDEFINED_TABLE is not None:
+            return PREDEFINED_TABLES[self._config.PREDEFINED_TABLE]
 
     @property
     def col_names(self):
@@ -37,10 +53,10 @@ class SqliteFind(Command):
 
     @property
     def col_names_and_type_strs(self):
-        if self._config.COL_TYPES is None:
+        if self.col_types_str is None:
             return
         else:
-            for i, s in enumerate(self._config.COL_TYPES.strip(' ').split(';')):
+            for i, s in enumerate(self.col_types_str.strip(' ').split(';')):
                 if s.count(':') == 0:
                     name = "Col {}".format(i)
                     type_str = s
