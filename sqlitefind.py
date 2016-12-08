@@ -3,6 +3,8 @@
 # Based on Dave Lassalle's (@superponible) firefox volatility plugins:
 #     https://github.com/superponible/volatility-plugins
 
+import csv
+
 from volatility.scan import BaseScanner
 from volatility.commands import Command
 from volatility import utils
@@ -92,3 +94,14 @@ class SqliteFind(Command):
     def generator(self, data):
         for datum in data:
             yield (0, list(self.format_output_fields(datum)))
+
+    def render_csv(self, outfd, data):
+        header_row = []
+        for field_name, field_type in self.get_output_fields():
+            header_row.append(field_name)
+        outfd.write(', '.join(header_row))
+        outfd.write('\n')
+
+        for d in data:
+            fields = list(self.format_output_fields(d))
+            csv.writer(outfd,quoting=csv.QUOTE_ALL).writerow(fields)

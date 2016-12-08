@@ -389,16 +389,18 @@ def _parse_type_str(type_str):
         elif t == 'int':
             for i in [1, 2, 3, 4, 5, 6, 7, 8, 9]:
                 type_set.add(i)
+        elif t.startswith('int'):
+            raise NotImplementedError()
         elif t in ('blob', 'string'):
             type_set.add(t)
         elif t == "notnull":
             type_set.remove(0)
         elif t.startswith('string'):
             raise NotImplementedError()
-        elif t == 'timestamp':
-            raise NotImplementedError()
         else:
-            raise ValueError('Unknown column type "{}"'.format(t))
+            #TODO
+            raise NotImplementedError('Col type not implemented yet "{}"'.format(t))
+            #raise ValueError('Unknown column type "{}"'.format(t))
 
     return type_set
 
