@@ -47,8 +47,8 @@ def parse_record(buf, start=0, n_cols=None, type_sets=None):
     the data is indeed a record. If any of these checks fail, a
     SqliteParseError is raised.
 
-    `start` should point to the start of the B-Tree leaf cell header that
-    contains the record. buf[start] should always be 0x0d.
+    `start` should point to the payload length of the record, which is the
+    field directly before the row id and header length.
 
     If `n_cols` is given, then SqliteParseError is raised if there are not
     that many columns in the record.
@@ -61,11 +61,6 @@ def parse_record(buf, start=0, n_cols=None, type_sets=None):
     first `len(type_sets)` columns are checked for types.
     """
     i = start  # i always points to the next byte in buf to parse
-
-    # B-Tree Leaf Cell Header byte
-    if ord(buf[i]) == 0x0d:
-        raise SqliteParseError("B-Tree Leaf Cell header 0x0d not present")
-    i += 1
 
     # Payload length
     payload_len, l = parse_varint(buf, i)
@@ -133,9 +128,6 @@ def parse_record(buf, start=0, n_cols=None, type_sets=None):
                                                         type_set))
 
     # Check: payload length
-    # Subtract -3 since payload_len does not include B-Tree Leaf Cell header,
-    # payload_len and row_id.
-    #TODO: This assumes the varints payload_len and row_id are 1 byte
     actual_payload_len = i - header_start
     if actual_payload_len != payload_len:
         raise SqliteParseError("Payload length field does not match actual "
@@ -156,6 +148,8 @@ def count_varints(buf, start=0, n=1, backward=False):
     if n < 0:
         n = -n
         backward = not backward
+    elif n == 0:
+        return start
 
     if not backward: raise NotImplementedError()  #TODO
 
@@ -313,10 +307,10 @@ Needle = namedtuple("Needle", "yara_rule varint_offset byte_offset")
 
 class SqliteRecordSearch(object):
 
-    def __init__(self, col_type_strs):
-        self.col_type_strs = col_type_strs
+    def __init__(self, col_type_strs=()):
+        self.col_type_strs = list(col_type_strs)
 
-        self.type_sets = [_parse_type_str(s) for s in col_type_strs]
+        self.type_sets = [_parse_type_str(s) for s in self.col_type_strs]
         self.needle = _get_search_needle(self.type_sets)
 
     @property
@@ -351,7 +345,7 @@ def _get_search_needle(type_sets):
     start, length = _longest_run(usable_cols)
 
     if start is None:
-        raise NotImplementedError("")
+        return Needle(None, 0, 0)
 
     # Build yara hex string
     hex_str = []
@@ -370,12 +364,13 @@ def _get_search_needle(type_sets):
     yara_rule = yara.compile(source=rule_str)
 
     # Our search puts us `start` varints into the header. There are `start`+3
-    # varints (row id, payload length, header length) and one byte (B-Tree leaf
-    # cell header byte) to count back until we get to the start of the cell.
-    return Needle(yara_rule, -start-3, -1)
+    # varints (row id, payload length, header length) to count back until we
+    # get to the start of the cell.
+    return Needle(yara_rule, -start-3, 0)
 
 def _parse_type_str(type_str):
     """Takes a type string and returns a type set."""
+    type_str = type_str.strip(' ')
     if len(type_str) == 0:
         raise ValueError('Column type cannot be blank. Use "?" for unknown '
                          'column types.')
@@ -387,8 +382,8 @@ def _parse_type_str(type_str):
         t = t.lower()
         if t == "bool":
             #TODO: Schema format 4 or higher is assumed, make in an option.
-            for i in [8, 9]:
-                type_set.add(i)
+            type_set.add(8)
+            type_set.add(9)
         elif t == "null":
             type_set.add(0)
         elif t == 'int':
@@ -432,7 +427,7 @@ def _longest_run(xs):
 
     return longest_run_start, longest_run_len
 
-def _search_addr_space(address_space, rule):
+def _search_addr_space(address_space, yara_rule):
     blocksize = 1024 * 1024 * 10
     overlap = 1024
     match_offsets = set()
@@ -446,14 +441,24 @@ def _search_addr_space(address_space, rule):
             to_read = min(blocksize+overlap, run_pos+run_size - pos)
 
             # Read and search
-            buf = address_space.read(pos, to_read)
-            matched_rules = rule.match(data=buf)
-            if matched_rules:
-                for str_pos, str_name, str_value in matched_rules[0].strings:
-                    absolute_offset = str_pos + pos
+            buf = address_space.zread(pos, to_read)
+            if yara_rule is not None:
+
+                matched_rules = yara_rule.match(data=buf)
+                if matched_rules:
+                    for str_pos, str_name, str_value in matched_rules[0].strings:
+                        absolute_offset = str_pos + pos
+                        if absolute_offset in match_offsets:
+                            continue
+                        match_offsets.add(absolute_offset)
+                        yield buf, str_pos, absolute_offset
+
+            else:  # Fall back to returning every byte if no yara rule given
+                for i in range(len(buf)):
+                    absolute_offset = i + pos
                     if absolute_offset in match_offsets:
                         continue
                     match_offsets.add(absolute_offset)
-                    yield buf, str_pos, absolute_offset
+                    yield buf, i, absolute_offset
 
             pos += blocksize
