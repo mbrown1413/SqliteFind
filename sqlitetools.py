@@ -387,7 +387,7 @@ def _parse_type_str(type_str):
         elif t == "null":
             type_set.add(0)
         elif t == 'int':
-            for i in [1, 2, 3, 4, 5, 6, 7, 8, 9]:
+            for i in [1, 2, 3, 4, 5, 6, 8, 9]:
                 type_set.add(i)
         elif t.startswith('int'):
             raise NotImplementedError()
