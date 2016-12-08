@@ -1,5 +1,5 @@
 
-SqliteFind is a plugin for volatility for finding sqlite database rows.
+SqliteFind is a Volatility plugin for finding sqlite database rows.
 
 Installing
 ==========
@@ -47,7 +47,12 @@ add "null" to your type list if it is a possible value.
 Predefined Tables
 -----------------
 
-TODO
+It is a bit of a pain specifying the full table description using "-c" every
+time. Some common tables are predefined, and can be specified with "-P":
+
+    $ volatility --profile=<profile> -f <memory file> sqlitefind -P firefox_cookies
+
+To see a full list of predefined tables, see "--help" or use "-P help".
 
 
 Output Format
@@ -77,7 +82,60 @@ CSV output is also supported, using "--output=csv":
     $ volatility --profile=<profile> -f <memory file> sqlitefind -c "id:int,null; field1:string; field2:bool" -O "address,values" --output=csv --output-file=cookies.csv
 
 
+Limitations
+===========
+
+Large Records - If a record does not fit in one B-Tree cell, it will be either
+missed or corrupted. This is because the rows are searched without using any
+database header information. If a row is large enough to be split between
+multiple pages, we can only find the data from the first page. After that,
+we will either read garbage data, or encounter an error and assume that it's
+not a real row.
+
+False positives - There are a lot of checks to make the data parsed is actually
+a row, but especially when there are not many columns, false positives can be
+found. If no column types are specified, you will definitely see some of these,
+but they are usually easy to pick out manually. Hint: include the types in the
+output to make falso positives more obvious.
+
+
 How it Works
 ============
+
+When you specify the column types using "-c", it searches for a section of the
+row header that matches those types. 
+
+  1. Build needle - Based on column types given, figure out what to search for.
+  2. Search memory - Finds all instances of needle in memory.
+  3. Parse row - Perform checks to make sure this is actually row data. Return
+        the data if it looks good.
+
+Build Needle
+------------
+
+TODO
+
+Example:
+
+    bool;      null,float;  string;     bool
+    (08 | 09)  (00 | 07)    var length  (08 | 09)
+
+The needle would be "(08 | 09)  (00 | 07)", because it's the longest part of the
+header that has fixed length.
+
+The routine that builds the needle also returns where the needle is relative to
+the beginning of the record. i.e. it specified how many varints to count
+forwards or backwards and how many bytes to count forwards or backwards to get
+to the record. This is what allows the needle to be anywhere in the header. In
+the future it will be possible to have a needle located in the beginning of the
+actual column data.
+
+Search Memory
+-------------
+
+TODO
+
+Parse Row
+---------
 
 TODO
