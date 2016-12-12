@@ -40,6 +40,10 @@ class SqliteFind(Command):
         searcher = sqlitetools.RowSearch(schema)
 
         print "Needle Size: {}".format(searcher.needle.size)
+        if searcher.needle.size < 3:
+            print "WARNING: Needle size is small. Things may run slowly."
+            print "         If there are too many matches, you will see the error:"
+            print '         "yara.Error: internal error: 30"'
         for address, row_id, types, values in searcher.find_records(address_space):
             yield address, row_id, types, values
 
