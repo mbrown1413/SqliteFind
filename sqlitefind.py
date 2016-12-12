@@ -18,6 +18,7 @@ import sqlitetools
 
 PREDEFINED_TABLES = {
     "firefox_cookies": "id:int,null; baseDomain:string; originAttributes:string; name:string; value:string; host:string; path:string; expiry:int; lastAccessed:int; creationTime:int; isSecure:bool; isHttpOnly:bool; appId:int; inBrowserElement:bool",
+    "sqlite_master": "type:string; name:string; tbl_name:string; rootpage:int; sql:string",
 }
 
 class SqliteFind(Command):
@@ -27,55 +28,37 @@ class SqliteFind(Command):
         config.add_option('COL-TYPES', short_option='c', default=None,
             help='Descriptor of types each column can have') # TODO: Better help
         config.add_option('OUTPUT-STYLE', short_option='O', default="values",
-            help='What fields to include in the output. Comma separated list of any of the values: "all_values" - all of the row\'s values in one field; "values" - Row\'s values in separate fields; "address" - Address of row in memory; "all_types" - List of all serial types in one field.')
+            help='What fields to include in the output. Comma separated list of any of the values: "all_values" - all of the row\'s values in one field; "values" - Row\'s values in separate fields; "address" - Address of row in memory; "all_types" - List of all serial types in one field; "row_id" - Sqlite rowid that is unique within a table.')
         config.add_option('PREDEFINED-TABLE', short_option="P", default=None,
             choices=PREDEFINED_TABLES.keys(),
             help='Choose column types from a set of predefined tables. Use this instead of "-c" if the table you are searching for is already predefined.')
 
-    @property
-    def col_types_str(self):
-        if self._config.COL_TYPES and self._config.PREDEFINED_TABLE:
-            debug.error("Cannot use both -c and -P.")
-        if self._config.COL_TYPES is not None:
-            return self._config.COL_TYPES
-        if self._config.PREDEFINED_TABLE is not None:
-            return PREDEFINED_TABLES[self._config.PREDEFINED_TABLE]
-
-    @property
-    def col_names(self):
-        for name, type_str in self.col_names_and_type_strs:
-            yield name
-
-    @property
-    def col_type_strs(self):
-        for name, type_str in self.col_names_and_type_strs:
-            yield type_str
-
-    @property
-    def col_names_and_type_strs(self):
-        if self.col_types_str is None:
-            return
-        else:
-            for i, s in enumerate(self.col_types_str.strip(' ').split(';')):
-                if s.count(':') == 0:
-                    name = "Col {}".format(i)
-                    type_str = s
-                elif s.count(':') == 1:
-                    name, type_str = s.split(':')
-                else:
-                    debug.error('Error parsing column types: ":" appeared twice.')
-
-                yield name, type_str
-
     def calculate(self):
         address_space = utils.load_as(self._config, astype="physical")
 
-        searcher = sqlitetools.SqliteRecordSearch(self.col_type_strs)
-        for address, types, values in searcher.find_records(address_space):
-            yield address, types, values
+        schema = self.get_schema()
+        searcher = sqlitetools.RowSearch(schema)
+
+        print "Needle Size: {}".format(searcher.needle.size)
+        for address, row_id, types, values in searcher.find_records(address_space):
+            yield address, row_id, types, values
+
+    def get_schema(self):
+        if self._config.COL_TYPES and self._config.PREDEFINED_TABLE:
+            debug.error("Cannot use both -c and -P.")
+        if self._config.COL_TYPES is not None:
+            col_type_str = self._config.COL_TYPES
+        if self._config.PREDEFINED_TABLE is not None:
+            col_type_str = PREDEFINED_TABLES[self._config.PREDEFINED_TABLE]
+
+        return sqlitetools.TableSchema.from_str(col_type_str)
+
+    @property
+    def col_names(self):
+        return self.get_schema().col_names
 
     def format_output_fields(self, datum):
-        address, types, values = datum
+        address, row_id, types, values = datum
         for field_desc in self._config.OUTPUT_STYLE.split(','):
             if field_desc == "all_values":
                 yield str(values)
@@ -86,6 +69,8 @@ class SqliteFind(Command):
                 yield Address(address)
             elif field_desc == "all_types":
                 yield str(types)
+            elif field_desc == "row_id":
+                yield row_id
 
     def get_output_fields(self):
         for field_desc in self._config.OUTPUT_STYLE.split(','):
@@ -98,6 +83,8 @@ class SqliteFind(Command):
                 yield "Address", Address
             elif field_desc == "all_types":
                 yield "Types", str
+            elif field_desc == "row_id":
+                yield "Row ID", int
             else:
                 debug.error('Unknown field "{}"'.format(field_desc))
 
@@ -121,3 +108,38 @@ class SqliteFind(Command):
         for d in data:
             fields = list(self.format_output_fields(d))
             csv.writer(outfd,quoting=csv.QUOTE_ALL).writerow(fields)
+
+
+class SqliteFindTables(Command):
+
+    def __init__(self, config, *args, **kwargs):
+        super(SqliteFindTables, self).__init__(config, *args, **kwargs)
+
+    def calculate(self):
+        address_space = utils.load_as(self._config, astype="physical")
+
+        needle = sqlitetools.Needle(
+            yara.compile(source='rule r1 { strings: $a = "table" condition: $a }'),
+            5, -8, 0
+        )
+        schema = sqlitetools.TableSchema.from_str(PREDEFINED_TABLES["sqlite_master"])
+        searcher = sqlitetools.RowSearch(schema, needle)
+
+        for address, row_id, types, values in searcher.find_records(address_space):
+            sql = values[4]
+            table_name, table_schema = sqlitetools.TableSchema.from_sql(sql)
+            if not table_name or table_name != values[2]:
+                continue
+            yield table_name, str(table_schema)
+
+    def unified_output(self, data):
+        return TreeGrid([
+                ("Name", str),
+                ("Column Type String", str),
+            ],
+            self.generator(data)
+        )
+
+    def generator(self, data):
+        for name, col_type_str in data:
+            yield (0, [str(name), str(col_type_str)])

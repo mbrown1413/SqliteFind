@@ -18,11 +18,6 @@ The sqlite format is described here:
 
 """
 
-# Terms used in implementation:
-#   type set - A set that describes what possible types of a column. Each item
-#              in the set is either a serial type integer or "string" or
-#              "blob".
-
 #TODO: Consider using the python bitsting library.
 
 import struct
@@ -36,11 +31,266 @@ class SqliteParseError(Exception):
     pass
 
 
+#######################################
+########## Type Definitions ###########
+#######################################
+
+# Types need to:
+#   stype -> is this your type?
+#   stype -> length
+#   stype buf[s:s+length]-> value
+#   reserved, error
+
+class Type(object):
+
+    def __init__(self, *names, **kwargs):
+        """
+        Required:
+            serial_types - None means there are too many serial types to
+                           enumarate, (i.e. string, blob.
+            size_func
+            decode_func
+        Optional:
+            serial_type_test - Falls back to testing membership of serial_types
+        """
+        self.names = names
+        for attr in 'serial_types serial_type_test size_func decode_func'.split():
+            setattr(self, attr, kwargs.pop(attr, None))
+        if kwargs:
+            raise ValueError("Extraneous kwargs {}".format(kwargs))
+
+    def __str__(self):
+        return self.name
+
+    @property
+    def name(self):
+        return self.names[0]
+
+    def matches_type(self, stype):
+        if self.serial_type_test:
+            return self.serial_type_test(stype)
+        else:
+            return stype in self.serial_types
+
+    def size(self, stype):
+        if self.size_func:
+            return self.size_func(stype)
+
+    def decode(self, stype, buf, start=0):
+        l = self.size(stype)
+        buf = buf[start:start+l]
+        if len(buf) < l:
+            raise SqliteParseError("Not enough bytes in buffer to decode column")
+        value = self.decode_func(stype, buf)
+        return value, l
+
+    def matches_str(self, s):
+        #TODO: Matches with numbers, like "varchar(100)"
+        for name in self.names:
+            if s == name:
+                return True
+        return False
+
+    @classmethod
+    def from_int(cls, i):
+        for t in TYPES:
+            if t.matches_type(i):
+                return t
+
+    @classmethod
+    def from_str(cls, s):
+        #TODO: Matches with numbers, like "varchar(100)"
+        s = s.lower()
+        for t in TYPES:
+            if t.matches_str(s):
+                return t
+
+def _reserved_stype_error(*args):
+    raise SqliteParseError("Reserved stype used")
+
+# Serial type meanings taken directly from:
+#   https://www.sqlite.org/fileformat2.html#record_format
+TYPES = (
+    Type("null",
+        serial_types = (0,),
+        size_func = lambda stype: 0,
+        decode_func = lambda stype, buf: None,
+    ),
+    Type("bool",
+        serial_types = (8, 9),
+        size_func = lambda stype: 0,
+        decode_func = lambda stype, buf: 0 if stype == 8 else 1,
+    ),
+    Type("int", "integer",
+        serial_types = (1, 2, 3, 4, 5, 6, 8, 9),
+        size_func = lambda stype: {
+                1: 1,
+                2: 2,
+                3: 3,
+                4: 4,
+                5: 6,
+                6: 8,
+                8: 0,
+                9: 0,
+            }[stype],
+        decode_func = lambda stype, buf: parse_twos_comp_bytes(buf),
+    ),
+    Type("float",
+        serial_types = (7,),
+        size_func = lambda stype: 8,
+        decode_func = lambda stype, buf: \
+            struct.unpack('>d', ''.join(buf[start:start+8]))[0],
+    ),
+    Type("blob",
+        serial_types = None,
+        serial_type_test = lambda stype: stype >= 12 and stype & 1 == 0,
+        size_func = lambda stype: (stype-12) / 2,
+        decode_func = lambda stype, buf: buf
+    ),
+    Type("string", "text", "varchar(*)",
+        serial_types = None,
+        serial_type_test = lambda stype: stype >= 13 and stype & 1 == 1,
+        size_func = lambda stype: (stype-13) / 2,
+        decode_func = lambda stype, buf: buf  #TODO: Encodings?
+    ),
+    Type("reserved",
+        serial_types = (10, 11),
+        size_func = _reserved_stype_error,
+        decode_func = _reserved_stype_error,
+    ),
+    Type("?", "any", "unknown",
+        serial_types = None,
+        serial_type_test = lambda stype: True,
+        size_func = None,
+        decode_func = None,
+    ),
+)
+
+###################################
+########## Table Schema ###########
+###################################
+
+class TableSchema(object):
+
+    def __init__(self, type_sets, col_names):
+        self.type_sets = type_sets
+        self._col_names = list(col_names)
+        for i in range(len(self.type_sets)-len(self._col_names)):
+            self._col_names.append(None)
+        for i in range(len(self._col_names)-len(self.type_sets)):
+            self.type_sets.append(None)
+
+    def __len__(self):
+        return self.n_cols
+
+    @property
+    def n_cols(self):
+        return len(self.type_sets)
+
+    def __str__(self):
+        result = []
+        for name, types in zip(self._col_names, self.type_sets):
+            types_str = ','.join(str(t) for t in types)
+            if name == None:
+                result.append(types_str)
+            else:
+                result.append("{}:{}".format(name, types_str))
+        return '; '.join(result)
+
+    def __iter__(self):
+        for type_set in self.type_sets:
+            yield type_set
+
+    @property
+    def col_names(self):
+        for i, name in enumerate(self._col_names):
+            if name is None:
+                yield "Col {}".format(n)
+            else:
+                yield name
+
+    @classmethod
+    def from_str(cls, s):
+        types = []
+        names = []
+        for col_str in s.split(';'):
+
+            if ':' in col_str:
+                names.append(col_str[:col_str.index(':')])
+                col_str = col_str[col_str.index(':')+1:]
+            else:
+                names.append(None)
+
+            type_set = set()
+            for t in col_str.split(','):
+                t = t.strip()
+                type_set.add(Type.from_str(t))
+            types.append(type_set)
+
+        return TableSchema(types, names)
+
+    @classmethod
+    def from_sql(cls, sql):
+        if not sql.startswith("CREATE TABLE "):
+            return None, None
+        if not sql.index('('):
+            return None, None
+        table_name = sql[len("CREATE TABLE "):sql.index('(')].strip()
+
+        print
+        print
+        print "SQL:", sql
+        col_part = crop_matching_paren(sql, sql.index('('))
+        if col_part is None:
+            print "(couldn't find matching paren)"
+            return None, None
+
+        #TODO: Don't split on comma inside parenthesis "(blah, blah)".
+        #      This can happen with uniqueness constraints.
+        names = []
+        type_sets = []
+        for col_str in col_part.split(","):
+            col_str = col_str.strip()
+            words = col_str.split()
+            print "words:", words
+            if len(words) < 2:
+                print "(less than 2 words)", len(words), words
+                return None, None
+            names.append(words[0])
+            type_str = words[1].lower()
+            type_set = set([Type.from_str(type_str)])
+            if "NOT NULL" not in col_str:
+                type_set.add(Type.from_str("null"))
+            type_sets.append(type_set)
+
+        print "PASSED!!!!!", str(TableSchema(type_sets, names))
+        return table_name, TableSchema(type_sets, names)
+
+def crop_matching_paren(s, start):
+    assert s[start] == '('
+
+    p_count = 0
+    end = None
+    for i, c in enumerate(s[start+1:]):
+        if c == '(':
+            p_count += 1
+        elif c == ')':
+            p_count -= 1
+        if p_count == -1:
+            end = start+i+1
+            break
+
+    if end is None:
+        return None
+    assert s[end] == ')'
+    return s[start+1 : end]
+
+
 ###########################################
 ########## Parsing And Encoding ###########
 ###########################################
 
-def parse_record(buf, start=0, n_cols=None, type_sets=None):
+def parse_record(buf, start=0, schema=None):
     """
     Reads a record in `buf` at position `start`. Return a tuple of serial types
     and a tuple of corresponding values. Many checks are made to validate that
@@ -49,16 +299,6 @@ def parse_record(buf, start=0, n_cols=None, type_sets=None):
 
     `start` should point to the payload length of the record, which is the
     field directly before the row id and header length.
-
-    If `n_cols` is given, then SqliteParseError is raised if there are not
-    that many columns in the record.
-
-    If `type_sets` is given, it should be a list of sets. Each set corresponds
-    to a set of possible types for each column, or None if no checks are to be
-    made for that column. Values in the set can be an integer serial type (see
-    https://www.sqlite.org/fileformat2.html#record_format) or "string" or
-    "blob". If `type_sets` is shorter than the number of columns, only the
-    first `len(type_sets)` columns are checked for types.
     """
     i = start  # i always points to the next byte in buf to parse
 
@@ -78,17 +318,17 @@ def parse_record(buf, start=0, n_cols=None, type_sets=None):
     # Check: Header length
     if header_len < 2:
         raise SqliteParseError("Header length {} too small".format(header_len))
-    if n_cols is not None:
+    if schema:
         # Each varint takes 1 to 9 bytes. There is one varint storing the
         # header length, then one for each column.
-        max_header_len = 9 * (1 + n_cols)
-        min_header_len = 1 * (1 + n_cols)
+        max_header_len = 9 * (1 + schema.n_cols)
+        min_header_len = 1 * (1 + schema.n_cols)
         if header_len > max_header_len:
             raise SqliteParseError("Header length of {} is too long for {} "
-                                   "cols".format(header_len, n_cols))
+                                   "cols".format(header_len, schema.n_cols))
         if header_len < min_header_len:
             raise SqliteParseError("Header length of {} too short for {} "
-                                   "cols".format(header_len, n_cols))
+                                   "cols".format(header_len, schema.n_cols))
 
     # Column types
     serial_types = []
@@ -97,35 +337,42 @@ def parse_record(buf, start=0, n_cols=None, type_sets=None):
         i += l
         serial_types.append(stype)
 
+    # Check: types
+    for n, (serial_type, type_set) in enumerate(zip(serial_types, schema)):
+
+        if type_set is None or serial_type in type_set:
+            continue
+
+        col_matched = False
+        for t in type_set:
+            if t.matches_type(serial_type):
+                col_matched = True
+                break
+
+        if not col_matched:
+            raise SqliteParseError("Serial type for col {} was {}, not "
+                    "one of the expected {}".format(n, serial_type,
+                                                    type_set))
+
     # Check: Record Length
     if i != header_start + header_len:
         raise SqliteParseError("Record header was not the correct length.")
 
     # Check: n_cols
-    if n_cols is not None and len(serial_types) != n_cols:
+    if schema and len(serial_types) != schema.n_cols:
         raise SqliteParseError("Expected {} columns, got "
-                               "{}".format(n_cols, len(serial_types)))
+                               "{}".format(schema.n_cols, len(serial_types)))
 
     # Parse columns
     values = []
     for stype in serial_types:
-        value, l = parse_col_value(stype, buf, i)
+        value, l = Type.from_int(stype).decode(stype, buf, i)
+        if l < 0:
+            #TODO: Not sure what the technically correct thing to do when a
+            #      varint encoding a type in the header is negative.
+            raise SqliteParseError("Negative string/blob length")
         i += l
         values.append(value)
-
-    # Check: type_sets
-    if type_sets is not None:
-        for n, (serial_type, type_set) in enumerate(zip(serial_types, type_sets)):
-            if type_set is None:
-                continue
-            if "blob" in type_set and serial_type >= 12 and serial_type & 1 == 0:
-                continue
-            if "string" in type_set and serial_type >= 13 and serial_type & 1 == 1:
-                continue
-            if serial_type not in type_set:
-                raise SqliteParseError("Serial type for col {} was {}, not "
-                        "one of the expected {}".format(n, serial_type,
-                                                        type_set))
 
     # Check: payload length
     actual_payload_len = i - header_start
@@ -134,7 +381,7 @@ def parse_record(buf, start=0, n_cols=None, type_sets=None):
                                "length of payload. payload_len={}, actual "
                                "length={}".format(payload_len, actual_payload_len))
 
-    return serial_types, values
+    return row_id, serial_types, values
 
 def count_varints(buf, start=0, n=1, backward=False):
     """Start at `start` in `buf` and return `n` varints forward or backward.
@@ -238,7 +485,7 @@ def parse_col_value(serial_type, buf, start=0):
     #   https://www.sqlite.org/fileformat2.html#record_format
 
     def len_check(l):
-        if l > len(buf)-start:
+        if l > len(buf)-start or start < 0:
             raise SqliteParseError("Tried to read column value off end of buffer.")
 
     if serial_type == 0:  # NULL type
@@ -282,8 +529,7 @@ def parse_col_value(serial_type, buf, start=0):
         raise SqliteParseError("Reserved serial_type {} used".format(serial_type))
 
     elif serial_type & 0x1 == 0:  # N>=12 and even.
-        #TODO: BLOB that is (N-12)/2 bytes in length
-        l = (serial_type - 13) / 2
+        l = (serial_type - 12) / 2
         len_check(l)
         return buf[start:start+l], l
 
@@ -303,19 +549,21 @@ def parse_col_value(serial_type, buf, start=0):
 ########## Searching ###########
 ################################
 
-Needle = namedtuple("Needle", "yara_rule varint_offset byte_offset")
+Needle = namedtuple("Needle", "yara_rule size varint_offset byte_offset")
 
-class SqliteRecordSearch(object):
+class RowSearch(object):
 
-    def __init__(self, col_type_strs=()):
-        self.col_type_strs = list(col_type_strs)
+    def __init__(self, schema, needle=None):
+        self.schema = schema
 
-        self.type_sets = [_parse_type_str(s) for s in self.col_type_strs]
-        self.needle = _get_search_needle(self.type_sets)
+        if needle:
+            self.needle = needle
+        else:
+            self.needle = _get_search_needle(self.schema)
 
     @property
     def n_cols(self):
-        return len(self.type_sets)
+        return self.schema.n_cols
 
     def find_records(self, haystack):
         if isinstance(haystack, volatility.addrspace.BaseAddressSpace):
@@ -327,25 +575,34 @@ class SqliteRecordSearch(object):
         raise NotImplementedError()  #TODO
 
     def _find_record_in_address_space(self, address_space):
+        found_rows = set()
         for buf, offset, absolute_offset in _search_addr_space(address_space, self.needle.yara_rule):
             try:
 
                 # Count back a number of varints and bytes according to needle
                 record_start = count_varints(buf, offset, self.needle.varint_offset) + self.needle.byte_offset
 
-                types, values = parse_record(buf, record_start, self.n_cols, self.type_sets)
-                yield absolute_offset, types, values
+                row_id, types, values = parse_record(buf, record_start, self.schema)
+                row = (tuple(types), tuple(values))
+                if row not in found_rows:
+                    found_rows.add(row)
+                    yield absolute_offset, row_id, types, values
 
             except SqliteParseError as e:
                 pass  # Match is not an actual record  :(
 
-def _get_search_needle(type_sets):
-    can_use_col = lambda c: 'string' not in c and 'blob' not in c
+def _get_search_needle(schema):
+    type_sets = list(schema)
+    def can_use_col(type_set):
+        for t in type_set:
+            if not t.serial_types:
+                return False
+        return True
     usable_cols = map(can_use_col, type_sets)
     start, length = _longest_run(usable_cols)
 
     if start is None:
-        return Needle(None, 0, 0)
+        return Needle(None, 0, 0, 0)
 
     # Build yara hex string
     hex_str = []
@@ -354,7 +611,8 @@ def _get_search_needle(type_sets):
 
         type_choices = []
         for t in types:
-            type_choices.append(hex(t)[2:].zfill(2))
+            for stype in t.serial_types:
+                type_choices.append(hex(stype)[2:].zfill(2))
         hex_str.append(' | '.join(type_choices))
 
         hex_str.append(')')
@@ -366,11 +624,11 @@ def _get_search_needle(type_sets):
     # Our search puts us `start` varints into the header. There are `start`+3
     # varints (row id, payload length, header length) to count back until we
     # get to the start of the cell.
-    return Needle(yara_rule, -start-3, 0)
+    return Needle(yara_rule, length, -start-3, 0)
 
 def _parse_type_str(type_str):
     """Takes a type string and returns a type set."""
-    type_str = type_str.strip(' ')
+    type_str = type_str.strip()
     if len(type_str) == 0:
         raise ValueError('Column type cannot be blank. Use "?" for unknown '
                          'column types.')
@@ -386,21 +644,22 @@ def _parse_type_str(type_str):
             type_set.add(9)
         elif t == "null":
             type_set.add(0)
-        elif t == 'int':
+        elif t in ('int', 'integer', 'tinyint', 'smallint', 'mediumint', 'bigint', 'unsigned big int', 'int2', 'int8'):
             for i in [1, 2, 3, 4, 5, 6, 8, 9]:
                 type_set.add(i)
-        elif t.startswith('int'):
-            raise NotImplementedError()
-        elif t in ('blob', 'string'):
+        elif t in ('real', 'double', 'double precision', 'float'):
+            type_set.add(7)
+        elif t == 'blob':
             type_set.add(t)
+        elif t in ('string', 'text', 'varchar'):
+            type_set.add('string')
         elif t == "notnull":
             type_set.remove(0)
-        elif t.startswith('string'):
+        elif t.startswith('varchar('):
             raise NotImplementedError()
         else:
             #TODO
             raise NotImplementedError('Col type not implemented yet "{}"'.format(t))
-            #raise ValueError('Unknown column type "{}"'.format(t))
 
     return type_set
 
@@ -435,10 +694,11 @@ def _search_addr_space(address_space, yara_rule):
     match_offsets = set()
 
     # Iterate over each valid run of memory
+    pos = 0
     for run_pos, run_size in sorted(address_space.get_available_addresses()):
 
         # Read in blocks to save memory
-        pos = run_pos
+        pos = max(run_pos, pos)
         while pos < run_pos+run_size:
             to_read = min(blocksize+overlap, run_pos+run_size - pos)
 
