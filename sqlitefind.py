@@ -147,3 +147,8 @@ class SqliteFindTables(Command):
     def generator(self, data):
         for name, col_type_str in data:
             yield (0, [str(name), str(col_type_str)])
+
+    def render_csv(self, outfd, data):
+        outfd.write('Name, Column Type String\n')
+        for row in data:
+            csv.writer(outfd,quoting=csv.QUOTE_ALL).writerow(row)
