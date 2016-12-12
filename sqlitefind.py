@@ -131,10 +131,6 @@ class SqliteFindTables(Command):
             try:
                 table_name, table_schema = sqlitetools.TableSchema.from_sql(sql)
             except sqlitetools.SqlParsingError as e:
-                print
-                print
-                print e
-                print sql
                 continue
             if table_name != values[2]:
                 continue
