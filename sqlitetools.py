@@ -467,8 +467,10 @@ def parse_twos_comp_bytes(buf, n_bits=None):
         n_bits = len(buf)*8
 
     num = 0
-    for i, byte in enumerate(buf[::-1]):
-        num += ord(byte) * i**256
+    digit_value = 1
+    for byte in buf[::-1]:
+        num += ord(byte) * digit_value
+        digit_value *= 256
 
     return twos_comp(num, n_bits)
 
