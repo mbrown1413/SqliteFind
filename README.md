@@ -1,6 +1,12 @@
 
 SqliteFind is a Volatility plugin for finding sqlite database rows.
 
+Written by Michael Brown as a project for the Computer Forensics class taught
+by Fabian Monrose at the University of North Carolina Chapel Hill. The idea of
+searching for sqlite database rows in memory is based on Dave Lassalle's
+(@superponible) [firefox volatility
+plugins](https://github.com/superponible/volatility-plugins).
+
 Installing
 ==========
 
