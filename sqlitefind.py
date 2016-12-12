@@ -119,6 +119,10 @@ class SqliteFindTables(Command):
 
     def __init__(self, config, *args, **kwargs):
         super(SqliteFindTables, self).__init__(config, *args, **kwargs)
+        config.add_option('RAW-SQL', short_option='R', default=False,
+            action="store_true",
+            help='Return a raw CREATE TABLE sql statement instead of column '
+                'type string')
 
     def calculate(self):
         address_space = utils.load_as(self._config, astype="physical")
@@ -138,7 +142,11 @@ class SqliteFindTables(Command):
                 continue
             if table_name != values[2]:
                 continue
-            yield table_name, str(table_schema)
+
+            if self._config.RAW_SQL:
+                yield table_name, sql
+            else:
+                yield table_name, str(table_schema)
 
     def unified_output(self, data):
         return TreeGrid([
@@ -153,6 +161,9 @@ class SqliteFindTables(Command):
             yield (0, [str(name), str(col_type_str)])
 
     def render_csv(self, outfd, data):
-        outfd.write('Name, Column Type String\n')
+        if self._config.RAW_SQL:
+            outfd.write('Name, SQL\n')
+        else:
+            outfd.write('Name, Column Type String\n')
         for row in data:
             csv.writer(outfd,quoting=csv.QUOTE_ALL).writerow(row)
