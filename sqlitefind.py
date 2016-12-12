@@ -44,8 +44,9 @@ class SqliteFind(Command):
             yield address, row_id, types, values
 
     def get_schema(self):
+        col_type_str = None
         if self._config.COL_TYPES and self._config.PREDEFINED_TABLE:
-            debug.error("Cannot use both -c and -P.")
+            debug.error("Cannot use both --col-types (-c) and --predefined-table (-c)")
         if self._config.COL_TYPES is not None:
             col_type_str = self._config.COL_TYPES
         if self._config.PREDEFINED_TABLE is not None:
@@ -127,8 +128,15 @@ class SqliteFindTables(Command):
 
         for address, row_id, types, values in searcher.find_records(address_space):
             sql = values[4]
-            table_name, table_schema = sqlitetools.TableSchema.from_sql(sql)
-            if not table_name or table_name != values[2]:
+            try:
+                table_name, table_schema = sqlitetools.TableSchema.from_sql(sql)
+            except sqlitetools.SqlParsingError as e:
+                print
+                print
+                print e
+                print sql
+                continue
+            if table_name != values[2]:
                 continue
             yield table_name, str(table_schema)
 

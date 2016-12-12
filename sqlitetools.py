@@ -21,6 +21,7 @@ The sqlite format is described here:
 #TODO: Consider using the python bitsting library.
 
 import struct
+import string
 from collections import namedtuple
 
 import yara  #TODO: Make yara optional
@@ -29,6 +30,11 @@ import volatility  #TODO: Make volatility optional
 
 class SqliteParseError(Exception):
     pass
+
+class SqlParsingError(Exception):
+    def __init__(self, sql, *args):
+        self.sql = sql
+        super(SqlParsingError, self).__init__(*args)
 
 
 #######################################
@@ -116,7 +122,7 @@ TYPES = (
         size_func = lambda stype: 0,
         decode_func = lambda stype, buf: None,
     ),
-    Type("bool",
+    Type("bool", "boolean",
         serial_types = (8, 9),
         size_func = lambda stype: 0,
         decode_func = lambda stype, buf: 0 if stype == 8 else 1,
@@ -147,7 +153,7 @@ TYPES = (
         size_func = lambda stype: (stype-12) / 2,
         decode_func = lambda stype, buf: buf
     ),
-    Type("string", "text", "varchar(*)",
+    Type("string", "text", "longvarchar", "varchar", "varchar(*)",
         serial_types = None,
         serial_type_test = lambda stype: stype >= 13 and stype & 1 == 1,
         size_func = lambda stype: (stype-13) / 2,
@@ -231,19 +237,17 @@ class TableSchema(object):
 
     @classmethod
     def from_sql(cls, sql):
+        if not all([c in string.printable for c in sql]):
+            raise SqlParsingError(sql, "SQL contains non-printable characters")
         if not sql.startswith("CREATE TABLE "):
-            return None, None
+            raise SqlParsingError(sql, 'Did not begin with "CREATE TABLE "')
         if not sql.index('('):
-            return None, None
+            raise SqlParsingError(sql, 'Could not find "("')
         table_name = sql[len("CREATE TABLE "):sql.index('(')].strip()
 
-        print
-        print
-        print "SQL:", sql
         col_part = crop_matching_paren(sql, sql.index('('))
         if col_part is None:
-            print "(couldn't find matching paren)"
-            return None, None
+            raise SqlParsingError(sql, "Couldn't find matching parenthesis")
 
         #TODO: Don't split on comma inside parenthesis "(blah, blah)".
         #      This can happen with uniqueness constraints.
@@ -252,18 +256,18 @@ class TableSchema(object):
         for col_str in col_part.split(","):
             col_str = col_str.strip()
             words = col_str.split()
-            print "words:", words
             if len(words) < 2:
-                print "(less than 2 words)", len(words), words
-                return None, None
+                raise SqlParsingError(sql, "Not enough words for a column name and type")
             names.append(words[0])
             type_str = words[1].lower()
-            type_set = set([Type.from_str(type_str)])
+            t = Type.from_str(type_str)
+            if not t:
+                raise SqlParsingError(sql, 'Unrecognized SQL type: "{}"'.format(type_str))
+            type_set = set([t])
             if "NOT NULL" not in col_str:
                 type_set.add(Type.from_str("null"))
             type_sets.append(type_set)
 
-        print "PASSED!!!!!", str(TableSchema(type_sets, names))
         return table_name, TableSchema(type_sets, names)
 
 def crop_matching_paren(s, start):
@@ -286,9 +290,9 @@ def crop_matching_paren(s, start):
     return s[start+1 : end]
 
 
-###########################################
-########## Parsing And Encoding ###########
-###########################################
+##################################################
+########## Record Parsing And Encoding ###########
+##################################################
 
 def parse_record(buf, start=0, schema=None):
     """
@@ -478,71 +482,6 @@ def encode_twos_comp_bits(i, n_bits):
         raise ValueError("{} too large for {}-bit int".format(i, n_bits))
 
     return bin(i)[2:]
-
-def parse_col_value(serial_type, buf, start=0):
-    """Returns (value of the column, number of bytes the column takes)."""
-    # Serial type meanings taken directly from:
-    #   https://www.sqlite.org/fileformat2.html#record_format
-
-    def len_check(l):
-        if l > len(buf)-start or start < 0:
-            raise SqliteParseError("Tried to read column value off end of buffer.")
-
-    if serial_type == 0:  # NULL type
-        return None, 0
-
-    elif serial_type == 1:  # 8-bit twos-complement integer
-        len_check(1)
-        return parse_twos_comp_bytes(buf[start:start+1]), 1
-
-    elif serial_type == 2:  # big-endian 16-bit twos-complement integer.
-        len_check(2)
-        return parse_twos_comp_bytes(buf[start:start+2]), 2
-
-    elif serial_type == 3:  # big-endian 24-bit twos-complement integer.
-        len_check(3)
-        return parse_twos_comp_bytes(buf[start:start+3]), 3
-
-    elif serial_type == 4:  # big-endian 32-bit twos-complement integer.
-        len_check(4)
-        return parse_twos_comp_bytes(buf[start:start+4]), 4
-
-    elif serial_type == 5:  # big-endian 48-bit twos-complement integer.
-        len_check(6)
-        return parse_twos_comp_bytes(buf[start:start+6]), 6
-
-    elif serial_type == 6:  # big-endian 64-bit twos-complement integer.
-        len_check(8)
-        return parse_twos_comp_bytes(buf[start:start+8]), 8
-
-    elif serial_type == 7:  # big-endian IEEE 754-2008 64-bit floating point number.
-        len_check(8)
-        return struct.unpack('>d', ''.join(buf[start:start+8]))[0], 8
-
-    elif serial_type == 8:  # the integer 0. (Only available for schema format 4 and higher.)
-        return 0, 0
-
-    elif serial_type == 9:  # the integer 1. (Only available for schema format 4 and higher.)
-        return 1, 0
-
-    elif serial_type in (10, 11):  # Not used. Reserved for expansion.
-        raise SqliteParseError("Reserved serial_type {} used".format(serial_type))
-
-    elif serial_type & 0x1 == 0:  # N>=12 and even.
-        l = (serial_type - 12) / 2
-        len_check(l)
-        return buf[start:start+l], l
-
-    elif serial_type & 0x1 == 1:  # N>=13 and odd.
-        # String in the text encoding and (N-13)/2 bytes in length. The nul
-        # terminator is not stored.
-        #TODO: What is current encoding?
-        l = (serial_type - 13) / 2
-        len_check(l)
-        return buf[start:start+l], l
-
-    else:
-        assert False  # Should never happen
 
 
 ################################
