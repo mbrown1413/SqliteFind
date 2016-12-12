@@ -27,7 +27,7 @@ class SqliteFind(Command):
         super(SqliteFind, self).__init__(config, *args, **kwargs)
         config.add_option('COL-TYPES', short_option='c', default=None,
             help='Descriptor of types each column can have') # TODO: Better help
-        config.add_option('OUTPUT-STYLE', short_option='O', default="values",
+        config.add_option('OUTPUT-COLS', short_option='O', default="values",
             help='What fields to include in the output. Comma separated list of any of the values: "all_values" - all of the row\'s values in one field; "values" - Row\'s values in separate fields; "address" - Address of row in memory; "all_types" - List of all serial types in one field; "row_id" - Sqlite rowid that is unique within a table.')
         config.add_option('PREDEFINED-TABLE', short_option="P", default=None,
             choices=PREDEFINED_TABLES.keys(),
@@ -64,7 +64,7 @@ class SqliteFind(Command):
 
     def format_output_fields(self, datum):
         address, row_id, types, values = datum
-        for field_desc in self._config.OUTPUT_STYLE.split(','):
+        for field_desc in self._config.OUTPUT_COLS.split(','):
             if field_desc == "all_values":
                 yield str(values)
             elif field_desc == "values":
@@ -78,7 +78,7 @@ class SqliteFind(Command):
                 yield row_id
 
     def get_output_fields(self):
-        for field_desc in self._config.OUTPUT_STYLE.split(','):
+        for field_desc in self._config.OUTPUT_COLS.split(','):
             if field_desc == "all_values":
                 yield "Values", str
             elif field_desc == "values":
