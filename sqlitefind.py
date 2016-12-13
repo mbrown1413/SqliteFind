@@ -127,6 +127,12 @@ class SqliteFindTables(Command):
     def calculate(self):
         address_space = utils.load_as(self._config, astype="physical")
 
+        # Special needle: the first field, "type", is always equal to "table"
+        # for the entries we're looking for.
+        #
+        # You might think a better needle is looking for "CREATE TABLE" in the
+        # "sql" field, but we can't count backwards over other text fields to
+        # get to the beginning of the record.
         needle = sqlitetools.Needle(
             yara.compile(source='rule r1 { strings: $a = "table" condition: $a }'),
             5, -8, 0
