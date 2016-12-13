@@ -41,7 +41,8 @@ arguments. This searches every valid address for a valid row. This is very slow
 in practice, so generally the expected column types are given using "-c", which
 allows us to search more efficiently:
 
-    $ volatility --profile=<profile> -f <memory file> sqlitefind -c "int,null; int,string; bool"
+    $ volatility --profile=<profile> -f <memory file> sqlitefind \
+                 -c "int,null; int,string; bool"
 
 Each column descriptor is separated by a semicolon (';'). Each descriptor is a
 comma (',') separated list of types. You can use the following types:
@@ -90,17 +91,23 @@ a comma separated list of:
 
 For example, to show the memory address of the row followed by the values:
 
-    $ volatility --profile=<profile> -f <memory file> sqlitefind -c "int,null; string; bool" -O "address,all_values"
+    $ volatility --profile=<profile> -f <memory file> sqlitefind \
+                 -c "int,null; string; bool" \
+                 -O "address,all_values"
 
 If you try the above, the field names will be something like "Col1", "Col2",
 "Col3". You can specify your own names by putting "<name>:" before the types
 specified in "-c":
 
-    $ volatility --profile=<profile> -f <memory file> sqlitefind -c "id:int,null; col1:int,string; col2:bool"
+    $ volatility --profile=<profile> -f <memory file> sqlitefind \
+                 -c "id:int,null; col1:int,string; col2:bool"
 
 CSV output is also supported, using "--output=csv":
 
-    $ volatility --profile=<profile> -f <memory file> sqlitefind -c "id:int,null; field1:string; field2:bool" -O "address,values" --output=csv --output-file=cookies.csv
+    $ volatility --profile=<profile> -f <memory file> sqlitefind \
+                 -c "id:int,null; field1:string; field2:bool" \
+                 -O "address,values" \
+                 --output=csv --output-file=cookies.csv
 
 
 Limitations
