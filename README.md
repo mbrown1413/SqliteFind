@@ -14,9 +14,8 @@ Installing
 importable. You should either add this directory to your volatility plugin
 path, or add a link to these files inside the volatility plugin folder.
 
-Requirements:
-
-  * YARA Python API - Running "import yara" should work in Python.
+Requires the YARA Python API. Try installing the pip package "yara-python".
+Running "import yara" should work in the Python shell.
 
 Basic Usage
 ===========
