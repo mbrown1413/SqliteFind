@@ -67,11 +67,19 @@ class SqliteFind(Command):
             # Use SqliteFindTables command to search for sqlite_master table.
             table_finder = SqliteFindTables(self._config)
             col_type_str = None
-            for table_name, schema in table_finder.calculate():
+            some_table_found = False
+            for table_name, needle_size, schema in table_finder.calculate():
+                some_table_found = True
                 #TODO: For now, we just find the fist matching table.
                 if table_name.lower() == self._config.TABLE_NAME.lower():
                     col_type_str = schema
                     break
+            if not some_table_found:
+                debug.error("No sqlite_master table found. Either there are "
+                    "no databases in memory, or the master table is not "
+                    "present. If you know the table schema you want to search "
+                    "for, you can specify --col-types (-c), or use "
+                    "--predefined-table (-P).")
             if col_type_str is None:
                 debug.error('Could not find table {} in sqlite_master. Try '
                     "using the sqlitefindtables command to search for "
@@ -176,27 +184,30 @@ class SqliteFindTables(Command):
             if table_name != values[2]:
                 continue
 
+            needle_size = sqlitetools.RowSearch(table_schema).needle.size
+
             if self._config.RAW_SQL:
-                yield table_name, sql
+                yield table_name, needle_size, sql
             else:
-                yield table_name, str(table_schema)
+                yield table_name, needle_size, str(table_schema)
 
     def unified_output(self, data):
         return TreeGrid([
                 ("Name", str),
+                ("Needle Size", int),
                 ("Column Type String", str),
             ],
             self.generator(data)
         )
 
     def generator(self, data):
-        for name, col_type_str in data:
-            yield (0, [str(name), str(col_type_str)])
+        for name, needle_size, col_type_str in data:
+            yield (0, [str(name), needle_size, str(col_type_str)])
 
     def render_csv(self, outfd, data):
         if self._config.RAW_SQL:
-            outfd.write('Name, SQL\n')
+            outfd.write('Name, Needle Size, SQL\n')
         else:
-            outfd.write('Name, Column Type String\n')
+            outfd.write('Name, Needle Size, Column Type String\n')
         for row in data:
             csv.writer(outfd,quoting=csv.QUOTE_ALL).writerow(row)
