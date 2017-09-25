@@ -50,7 +50,7 @@ class SqliteFind(Command):
     def get_schema(self):
         col_type_str = None
         if self._config.COL_TYPES and self._config.PREDEFINED_TABLE:
-            debug.error("Cannot use both --col-types (-c) and --predefined-table (-c)")
+            debug.error("Cannot use both --col-types (-c) and --predefined-table (-P)")
         if self._config.COL_TYPES is not None:
             col_type_str = self._config.COL_TYPES
         if self._config.PREDEFINED_TABLE is not None:
