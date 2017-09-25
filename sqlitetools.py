@@ -211,7 +211,7 @@ class TableSchema(object):
     def col_names(self):
         for i, name in enumerate(self._col_names):
             if name is None:
-                yield "Col {}".format(n)
+                yield "Col {}".format(i)
             else:
                 yield name
 
