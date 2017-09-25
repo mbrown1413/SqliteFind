@@ -25,6 +25,10 @@ class SqliteFind(Command):
 
     def __init__(self, config, *args, **kwargs):
         super(SqliteFind, self).__init__(config, *args, **kwargs)
+        config.add_option('TABLE-NAME', short_option="t", default=None,
+            help="Searches for the schema of the given table name in the "
+            "sqlite_master table, then uses that schema to find rows of that "
+            "table.")
         config.add_option('COL-TYPES', short_option='c', default=None,
             help='Descriptor of types each column can have') # TODO: Better help
         config.add_option('OUTPUT-COLS', short_option='O', default="values",
@@ -36,8 +40,7 @@ class SqliteFind(Command):
     def calculate(self):
         address_space = utils.load_as(self._config, astype="physical")
 
-        schema = self.get_schema()
-        searcher = sqlitetools.RowSearch(schema)
+        searcher = sqlitetools.RowSearch(self.schema)
 
         print "Needle Size: {}".format(searcher.needle.size)
         if searcher.needle.size < 3:
@@ -47,20 +50,44 @@ class SqliteFind(Command):
         for address, row_id, types, values in searcher.find_records(address_space):
             yield address, row_id, types, values
 
-    def get_schema(self):
-        col_type_str = None
-        if self._config.COL_TYPES and self._config.PREDEFINED_TABLE:
-            debug.error("Cannot use both --col-types (-c) and --predefined-table (-P)")
+    @property
+    def schema(self):
+        if hasattr(self, "_schema"):
+            return self._schema
+
+        if (self._config.TABLE_NAME,
+            self._config.COL_TYPES,
+            self._config.PREDEFINED_TABLE).count(None) != 2:
+                debug.error("Exactly one of the following options should be "
+                    "used: --table-name (-t), --col-types (-c), "
+                    "--predefined-table (-P)")
+
+        if self._config.TABLE_NAME is not None:
+
+            # Use SqliteFindTables command to search for sqlite_master table.
+            table_finder = SqliteFindTables(self._config)
+            col_type_str = None
+            for table_name, schema in table_finder.calculate():
+                #TODO: For now, we just find the fist matching table.
+                if table_name.lower() == self._config.TABLE_NAME.lower():
+                    col_type_str = schema
+                    break
+            if col_type_str is None:
+                debug.error('Could not find table {} in sqlite_master. Try '
+                    "using the sqlitefindtables command to search for "
+                    "tables.".format(self._config.TABLE_NAME))
+
         if self._config.COL_TYPES is not None:
             col_type_str = self._config.COL_TYPES
         if self._config.PREDEFINED_TABLE is not None:
             col_type_str = PREDEFINED_TABLES[self._config.PREDEFINED_TABLE]
 
-        return sqlitetools.TableSchema.from_str(col_type_str)
+        self._schema =  sqlitetools.TableSchema.from_str(col_type_str)
+        return self._schema
 
     @property
     def col_names(self):
-        return self.get_schema().col_names
+        return self.schema.col_names
 
     def format_output_fields(self, datum):
         address, row_id, types, values = datum
