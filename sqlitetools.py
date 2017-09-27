@@ -184,6 +184,12 @@ TYPES = (
         size_func = None,
         decode_func = None,
     ),
+    Type("primarykey",
+        serial_types = (0,),
+        size_func = lambda stype: 0,
+        # Primary keys are always NULL, their value is the row_id.
+        # Decoding handled specially, replaced with row_id in `parse_record()`.
+    ),
 )
 
 ###################################
@@ -224,6 +230,10 @@ class TableSchema(object):
                 yield "Col {}".format(i)
             else:
                 yield name
+
+    def col_is_primary_key(self, col_num):
+        type_set = self.type_sets[col_num]
+        return len(type_set) == 1 and list(type_set)[0].name == "primarykey"
 
     def __str__(self):
         result = []
@@ -290,6 +300,10 @@ class TableSchema(object):
             type_set = set([t])
             if "NOT NULL" not in col_str:
                 type_set.add(Type.from_str("null"))
+
+            if "PRIMARY KEY" in col_str:
+                type_set = set([Type.from_str("primarykey")])
+
             type_sets.append(type_set)
 
         return table_name, TableSchema(type_sets, names)
@@ -401,8 +415,11 @@ def parse_record(buf, start=0, schema=None):
 
     # Parse columns
     values = []
-    for stype in serial_types:
-        value, l = Type.from_int(stype).decode(stype, buf, i)
+    for n, stype in enumerate(serial_types):
+        if schema and schema.col_is_primary_key(n):
+            value, l = row_id, 0  # Primary keys take on value of row_id
+        else:
+            value, l = Type.from_int(stype).decode(stype, buf, i)
         if l < 0:
             #TODO: Not sure what the technically correct thing to do when a
             #      varint encoding a type in the header is negative.
