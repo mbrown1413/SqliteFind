@@ -647,7 +647,15 @@ def _search_addr_space(address_space, yara_rule):
             buf = address_space.zread(pos, to_read)
             if yara_rule is not None:
 
-                matched_rules = yara_rule.match(data=buf)
+                try:
+                    matched_rules = yara_rule.match(data=buf)
+                except yara.Error as e:
+                    if e.message == "internal error: 30":
+                        blocksize /= 2
+                        continue
+                    else:
+                        raise
+
                 if matched_rules:
                     for str_pos, str_name, str_value in matched_rules[0].strings:
                         absolute_offset = str_pos + pos
