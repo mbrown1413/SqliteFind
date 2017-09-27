@@ -1,7 +1,9 @@
 """
+Volatility commands for finding sqlite database rows in memory.
+
+    sqlitefindtables: Find table schemas by searching for sqlite_master table.
+    sqlitefind: Find database rows given a table name or schema.
 """
-# Based on Dave Lassalle's (@superponible) firefox volatility plugins:
-#     https://github.com/superponible/volatility-plugins
 
 import csv
 
@@ -32,10 +34,17 @@ class SqliteFind(Command):
         config.add_option('COL-TYPES', short_option='c', default=None,
             help='Descriptor of types each column can have') # TODO: Better help
         config.add_option('OUTPUT-COLS', short_option='O', default="values",
-            help='What fields to include in the output. Comma separated list of any of the values: "all_values" - all of the row\'s values in one field; "values" - Row\'s values in separate fields; "address" - Address of row in memory; "all_types" - List of all serial types in one field; "row_id" - Sqlite rowid that is unique within a table.')
+            help='What fields to include in the output. Comma separated list '
+                'of any of the values: "all_values" - all of the row\'s values '
+                'in one field; "values" - Row\'s values in separate fields; '
+                '"address" - Address of row in memory; "all_types" - List of all '
+                'serial types in one field; "row_id" - Sqlite rowid that is '
+                'unique within a table.')
         config.add_option('PREDEFINED-TABLE', short_option="P", default=None,
             choices=PREDEFINED_TABLES.keys(),
-            help='Choose column types from a set of predefined tables. Use this instead of "-c" if the table you are searching for is already predefined.')
+            help='Choose column types from a set of predefined tables. Use '
+                'this instead of "-c" if the table you are searching for is '
+                'already predefined.')
 
     def calculate(self):
         address_space = utils.load_as(self._config, astype="physical")
@@ -45,8 +54,6 @@ class SqliteFind(Command):
         print "Needle Size: {}".format(searcher.needle.size)
         if searcher.needle.size < 3:
             print "WARNING: Needle size is small. Things may run slowly."
-            print "         If there are too many matches, you will see the error:"
-            print '         "yara.Error: internal error: 30"'
         for address, row_id, types, values in searcher.find_records(address_space):
             yield address, row_id, types, values
 
@@ -98,6 +105,10 @@ class SqliteFind(Command):
         return self.schema.col_names
 
     def format_output_fields(self, datum):
+        """
+        Given an item returned from `calculate()`, returns the list of fields
+        for this row.
+        """
         address, row_id, types, values = datum
         for field_desc in self._config.OUTPUT_COLS.split(','):
             if field_desc == "all_values":
@@ -113,6 +124,7 @@ class SqliteFind(Command):
                 yield row_id
 
     def get_output_fields(self):
+        """Returns a list of column names for the output."""
         for field_desc in self._config.OUTPUT_COLS.split(','):
             if field_desc == "all_values":
                 yield "Values", str
@@ -170,7 +182,9 @@ class SqliteFindTables(Command):
         # get to the beginning of the record.
         needle = sqlitetools.Needle(
             yara.compile(source='rule r1 { strings: $a = "table" condition: $a }'),
-            5, -8, 0
+            size=5,
+            varint_offset=-8,
+            byte_offset=0,
         )
         schema = sqlitetools.TableSchema.from_str(PREDEFINED_TABLES["sqlite_master"])
         searcher = sqlitetools.RowSearch(schema, needle)

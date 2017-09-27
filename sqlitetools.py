@@ -12,20 +12,20 @@ Limitations:
     or corrupted.
   * False positives can be found (i.e. data that looks like a row but isn't).
 
-The sqlite format is described here:
+To understand the code, it will be useful to be familiar with the sqlite3
+format, in particular the serial types (integers representing the type of a
+column) and the storage structure of rows. The sqlite format is described here:
 
     https://www.sqlite.org/fileformat2.html
 
 """
 
-#TODO: Consider using the python bitsting library.
-
 import struct
 import string
 from collections import namedtuple
 
-import yara  #TODO: Make yara optional
-import volatility  #TODO: Make volatility optional
+import yara
+import volatility
 
 
 class SqliteParseError(Exception):
@@ -41,23 +41,26 @@ class SqlParsingError(Exception):
 ########## Type Definitions ###########
 #######################################
 
-# Types need to:
-#   stype -> is this your type?
-#   stype -> length
-#   stype buf[s:s+length]-> value
-#   reserved, error
-
 class Type(object):
 
     def __init__(self, *names, **kwargs):
         """
         Required:
-            serial_types - None means there are too many serial types to
-                           enumarate, (i.e. string, blob.
-            size_func
-            decode_func
+            names: The names that this type could be called in an SQL
+                statement. For example, a boolean could either be referred to
+                as "bool" or "boolean".
+            serial_types: List of integer serial types that this type may be
+                stored as. None means there are too many serial types to
+                enumarate, (i.e. string, blob).
+            size_func: A function that takes a serial type integer and returns
+                the length of the data storage.
+            decode_func: A function that takes a serial type integer and a data
+                buffer, and returns a decoded value that represents the data.
         Optional:
-            serial_type_test - Falls back to testing membership of serial_types
+            serial_type_test - A function that takes a serial type integer and
+                returns True if this type can be stored as that serial type.
+                Used when `serial_types` is None for strings and blobs. If not
+                given, falls back to testing membership of `serial_types`.
         """
         self.names = names
         for attr in 'serial_types serial_type_test size_func decode_func'.split():
@@ -72,17 +75,22 @@ class Type(object):
     def name(self):
         return self.names[0]
 
-    def matches_type(self, stype):
+    def matches_stype(self, stype):
+        """
+        Returns boolean indicating if this type can have the given serial type.
+        """
         if self.serial_type_test:
             return self.serial_type_test(stype)
         else:
             return stype in self.serial_types
 
     def size(self, stype):
+        """How many bytes the storage data for this type is."""
         if self.size_func:
             return self.size_func(stype)
 
     def decode(self, stype, buf, start=0):
+        """Returns the value of the data in `buf` starting at `start`."""
         l = self.size(stype)
         buf = buf[start:start+l]
         if len(buf) < l:
@@ -91,20 +99,26 @@ class Type(object):
         return value, l
 
     def matches_str(self, s):
+        """Returns True if the sql type string refers to this type."""
         #TODO: Matches with numbers, like "varchar(100)"
         for name in self.names:
             if s == name:
                 return True
         return False
 
+    def __repr__(self):
+        return "<SqliteType {}>".format(self.name)
+
     @classmethod
-    def from_int(cls, i):
+    def from_int(cls, stype):
+        """Return the appropriate type given a serial type."""
         for t in TYPES:
-            if t.matches_type(i):
+            if t.matches_stype(stype):
                 return t
 
     @classmethod
     def from_str(cls, s):
+        """Return the appropriate type given an sql type."""
         #TODO: Matches with numbers, like "varchar(100)"
         s = s.lower()
         for t in TYPES:
@@ -177,8 +191,18 @@ TYPES = (
 ###################################
 
 class TableSchema(object):
+    """
+    Stores the schema for a table including any possible types that each column
+    is expected to have.
+    """
 
     def __init__(self, type_sets, col_names):
+        """
+        `type_sets`: A list where each item is a set of Type objects. This is
+            the set of possible types for each column.
+        `col_names`: A list of names for each column. If a name is None it will
+            be given a name based on its column number.
+        """
         self.type_sets = type_sets
         self._col_names = list(col_names)
         for i in range(len(self.type_sets)-len(self._col_names)):
@@ -193,6 +217,14 @@ class TableSchema(object):
     def n_cols(self):
         return len(self.type_sets)
 
+    @property
+    def col_names(self):
+        for i, name in enumerate(self._col_names):
+            if name is None:
+                yield "Col {}".format(i)
+            else:
+                yield name
+
     def __str__(self):
         result = []
         for name, types in zip(self._col_names, self.type_sets):
@@ -206,14 +238,6 @@ class TableSchema(object):
     def __iter__(self):
         for type_set in self.type_sets:
             yield type_set
-
-    @property
-    def col_names(self):
-        for i, name in enumerate(self._col_names):
-            if name is None:
-                yield "Col {}".format(i)
-            else:
-                yield name
 
     @classmethod
     def from_str(cls, s):
@@ -245,7 +269,7 @@ class TableSchema(object):
             raise SqlParsingError(sql, 'Could not find "("')
         table_name = sql[len("CREATE TABLE "):sql.index('(')].strip()
 
-        col_part = crop_matching_paren(sql, sql.index('('))
+        col_part = _crop_matching_paren(sql, sql.index('('))
         if col_part is None:
             raise SqlParsingError(sql, "Couldn't find matching parenthesis")
 
@@ -270,7 +294,11 @@ class TableSchema(object):
 
         return table_name, TableSchema(type_sets, names)
 
-def crop_matching_paren(s, start):
+def _crop_matching_paren(s, start):
+    """
+    Return substring within two matching parenthesis, given the position of the
+    open parenthesis.
+    """
     assert s[start] == '('
 
     p_count = 0
@@ -299,10 +327,14 @@ def parse_record(buf, start=0, schema=None):
     Reads a record in `buf` at position `start`. Return a tuple of serial types
     and a tuple of corresponding values. Many checks are made to validate that
     the data is indeed a record. If any of these checks fail, a
-    SqliteParseError is raised.
+    `SqliteParseError` is raised.
 
-    `start` should point to the payload length of the record, which is the
-    field directly before the row id and header length.
+    `start` should be the offset inside `buf` of the record payload length,
+    which is the field directly before the row id and header length.
+
+    If given, `schema` is a `TableSchema` object representing the expected
+    types of the row. If the observed types do not match, SqliteParseError is
+    raised.
     """
     i = start  # i always points to the next byte in buf to parse
 
@@ -349,7 +381,7 @@ def parse_record(buf, start=0, schema=None):
 
         col_matched = False
         for t in type_set:
-            if t.matches_type(serial_type):
+            if t.matches_stype(serial_type):
                 col_matched = True
                 break
 
@@ -388,7 +420,9 @@ def parse_record(buf, start=0, schema=None):
     return row_id, serial_types, values
 
 def count_varints(buf, start=0, n=1, backward=False):
-    """Start at `start` in `buf` and return `n` varints forward or backward.
+    """
+    Start at a varint at `start` in `buf` and return `n` varints forward or
+    backward.
 
     `start` must point to the first byte of a varint already, or if `backward`
     is True then it must point one byte after a varint ends. Returned is an
@@ -490,6 +524,13 @@ def encode_twos_comp_bits(i, n_bits):
 ########## Searching ###########
 ################################
 
+# Needle
+# `yara_rule`: A rule (created with `yara.compile()`) of what to search for.
+# `size`: The length of the search string.
+# `varint_offset`: The number of varints to count to get from the match to the
+#     beginning of the record. Will usually be negative to count backwards.
+# `byte_offset`: Number of bytes to count (after counting `varint_offset`
+#     varints) to get to the beginning of the record.
 Needle = namedtuple("Needle", "yara_rule size varint_offset byte_offset")
 
 class RowSearch(object):
@@ -506,16 +547,7 @@ class RowSearch(object):
     def n_cols(self):
         return self.schema.n_cols
 
-    def find_records(self, haystack):
-        if isinstance(haystack, volatility.addrspace.BaseAddressSpace):
-            return self._find_record_in_address_space(haystack)
-        else:
-            return self._find_record_in_buf(haystack)
-
-    def _find_record_in_buf(self, buf):
-        raise NotImplementedError()  #TODO
-
-    def _find_record_in_address_space(self, address_space):
+    def find_records(self, address_space):
         found_rows = set()
         for buf, offset, absolute_offset in _search_addr_space(address_space, self.needle.yara_rule):
             try:
@@ -534,6 +566,11 @@ class RowSearch(object):
 
 def _get_search_needle(schema):
     type_sets = list(schema)
+
+    # Find start, length of needle
+    # Our needle will be in the row header, but it can't overlap any string or
+    # blob fields, since the varints representing those types can be more than
+    # 1 byte.
     def can_use_col(type_set):
         for t in type_set:
             if not t.serial_types:
@@ -567,43 +604,6 @@ def _get_search_needle(schema):
     # get to the start of the cell.
     return Needle(yara_rule, length, -start-3, 0)
 
-def _parse_type_str(type_str):
-    """Takes a type string and returns a type set."""
-    type_str = type_str.strip()
-    if len(type_str) == 0:
-        raise ValueError('Column type cannot be blank. Use "?" for unknown '
-                         'column types.')
-    if type_str is '?':
-        return None
-
-    type_set = set([])
-    for t in type_str.split(','):
-        t = t.lower()
-        if t == "bool":
-            #TODO: Schema format 4 or higher is assumed, make in an option.
-            type_set.add(8)
-            type_set.add(9)
-        elif t == "null":
-            type_set.add(0)
-        elif t in ('int', 'integer', 'tinyint', 'smallint', 'mediumint', 'bigint', 'unsigned big int', 'int2', 'int8'):
-            for i in [1, 2, 3, 4, 5, 6, 8, 9]:
-                type_set.add(i)
-        elif t in ('real', 'double', 'double precision', 'float'):
-            type_set.add(7)
-        elif t == 'blob':
-            type_set.add(t)
-        elif t in ('string', 'text', 'varchar'):
-            type_set.add('string')
-        elif t == "notnull":
-            type_set.remove(0)
-        elif t.startswith('varchar('):
-            raise NotImplementedError()
-        else:
-            #TODO
-            raise NotImplementedError('Col type not implemented yet "{}"'.format(t))
-
-    return type_set
-
 def _longest_run(xs):
     """
     Return start index and length of the longest run in the list `xs` of items
@@ -630,6 +630,12 @@ def _longest_run(xs):
     return longest_run_start, longest_run_len
 
 def _search_addr_space(address_space, yara_rule):
+    """Searches the address space using the given yara rule.
+
+    Yields tuples of `(buf, position, absolute_offset)`, where `buf` contains
+    the match, `buf[position]` is the start of the match, and `absolute_offset`
+    is the absolute address within `address_space` that the match occured.
+    """
     blocksize = 1024 * 1024 * 10
     overlap = 1024
     match_offsets = set()
@@ -647,8 +653,10 @@ def _search_addr_space(address_space, yara_rule):
             buf = address_space.zread(pos, to_read)
             if yara_rule is not None:
 
-                try:
+                try:  # Yara search
                     matched_rules = yara_rule.match(data=buf)
+
+                # Reduce blocksize if too many matches were found (yara error 30)
                 except yara.Error as e:
                     if e.message == "internal error: 30":
                         blocksize /= 2
@@ -657,6 +665,8 @@ def _search_addr_space(address_space, yara_rule):
                         raise
 
                 if matched_rules:
+
+                    # Calculate absolute offset of match and yield it
                     for str_pos, str_name, str_value in matched_rules[0].strings:
                         absolute_offset = str_pos + pos
                         if absolute_offset in match_offsets:
