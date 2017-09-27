@@ -45,6 +45,9 @@ class SqliteFind(Command):
             help='Choose column types from a set of predefined tables. Use '
                 'this instead of "-c" if the table you are searching for is '
                 'already predefined.')
+        config.add_option('HEURISTICS', short_option="H", default=False,
+            action="store_true",
+            help="Try to refine column types based on the column name.")
 
     def calculate(self):
         address_space = utils.load_as(self._config, astype="physical")
@@ -75,7 +78,7 @@ class SqliteFind(Command):
             table_finder = SqliteFindTables(self._config)
             col_type_str = None
             some_table_found = False
-            for table_name, needle_size, schema in table_finder.calculate():
+            for table_name, needle_size, schema in table_finder.calculate(self._config.HEURISTICS):
                 some_table_found = True
                 #TODO: For now, we just find the fist matching table.
                 if table_name.lower() == self._config.TABLE_NAME.lower():
@@ -97,7 +100,7 @@ class SqliteFind(Command):
         if self._config.PREDEFINED_TABLE is not None:
             col_type_str = PREDEFINED_TABLES[self._config.PREDEFINED_TABLE]
 
-        self._schema =  sqlitetools.TableSchema.from_str(col_type_str)
+        self._schema = sqlitetools.TableSchema.from_str(col_type_str, self._config.HEURISTICS)
         return self._schema
 
     @property
@@ -171,7 +174,7 @@ class SqliteFindTables(Command):
             help='Return a raw CREATE TABLE sql statement instead of column '
                 'type string')
 
-    def calculate(self):
+    def calculate(self, use_heuristics=False):
         address_space = utils.load_as(self._config, astype="physical")
 
         # Special needle: the first field, "type", is always equal to "table"
@@ -192,7 +195,7 @@ class SqliteFindTables(Command):
         for address, row_id, types, values in searcher.find_records(address_space):
             sql = values[4]
             try:
-                table_name, table_schema = sqlitetools.TableSchema.from_sql(sql)
+                table_name, table_schema = sqlitetools.TableSchema.from_sql(sql, use_heuristics)
             except sqlitetools.SqlParsingError as e:
                 continue
             if table_name != values[2]:

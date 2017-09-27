@@ -184,6 +184,12 @@ TYPES = (
         size_func = None,
         decode_func = None,
     ),
+    Type("timestamp",
+        serial_types = (6,),
+        size_func = lambda stype: 8,
+        #TODO: Parse into datetime object
+        decode_func = lambda row_id, stype, buf: parse_twos_comp_bytes(buf),
+    ),
     Type("primarykey",
         serial_types = (0,),
         size_func = lambda stype: 0,
@@ -202,13 +208,18 @@ class TableSchema(object):
     is expected to have.
     """
 
-    def __init__(self, type_sets, col_names):
+    def __init__(self, type_sets, col_names, use_heuristics=False):
         """
         `type_sets`: A list where each item is a set of Type objects. This is
             the set of possible types for each column.
         `col_names`: A list of names for each column. If a name is None it will
             be given a name based on its column number.
+        `use_heuristics`: If True, reduces the number of possible types using
+            heuristics based on the table name.
         """
+        if use_heuristics:
+            type_sets = apply_heurstics(type_sets, col_names)
+
         self.type_sets = type_sets
         self._col_names = list(col_names)
         for i in range(len(self.type_sets)-len(self._col_names)):
@@ -250,7 +261,7 @@ class TableSchema(object):
             yield type_set
 
     @classmethod
-    def from_str(cls, s):
+    def from_str(cls, s, use_heuristics=False):
         types = []
         names = []
         for col_str in s.split(';'):
@@ -267,10 +278,10 @@ class TableSchema(object):
                 type_set.add(Type.from_str(t))
             types.append(type_set)
 
-        return TableSchema(types, names)
+        return TableSchema(types, names, use_heuristics)
 
     @classmethod
-    def from_sql(cls, sql):
+    def from_sql(cls, sql, use_heuristics):
         if not all([c in string.printable for c in sql]):
             raise SqlParsingError(sql, "SQL contains non-printable characters")
         if not sql.startswith("CREATE TABLE "):
@@ -306,7 +317,7 @@ class TableSchema(object):
 
             type_sets.append(type_set)
 
-        return table_name, TableSchema(type_sets, names)
+        return table_name, TableSchema(type_sets, names, use_heuristics)
 
 def _crop_matching_paren(s, start):
     """
@@ -330,6 +341,20 @@ def _crop_matching_paren(s, start):
         return None
     assert s[end] == ')'
     return s[start+1 : end]
+
+def apply_heurstics(type_sets, col_names):
+    new_type_sets = []
+    for type_set, col_name in zip(type_sets, col_names):
+        col_name = col_name.lower()
+
+        if ("date" in col_name or "time" in col_name) and Type.from_str("int") in type_set:
+            new_set = set([Type.from_str("timestamp")])
+
+        else:
+            new_set = type_set.copy()
+
+        new_type_sets.append(new_set)
+    return new_type_sets
 
 
 ##################################################
