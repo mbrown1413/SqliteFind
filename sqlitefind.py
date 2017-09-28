@@ -48,16 +48,22 @@ class SqliteFind(Command):
         config.add_option('HEURISTICS', short_option="H", default=False,
             action="store_true",
             help="Try to refine column types based on the column name.")
+        config.add_option('PRINT-NEEDLE', default=False, action="store_true",
+            help="Print information about the search needle instead of "
+                "performing search.")
+
+        self.searcher = sqlitetools.RowSearch(self.schema)
+        print "Needle Size: {}".format(self.searcher.needle.size)
+        if self.searcher.needle.size < 3:
+            print "WARNING: Needle size is small. Things may run slowly."
 
     def calculate(self):
+        if self._config.PRINT_NEEDLE:
+            needle = sqlitetools.RowSearch(self.schema, verbose=True)
+            return
+
         address_space = utils.load_as(self._config, astype="physical")
-
-        searcher = sqlitetools.RowSearch(self.schema)
-
-        print "Needle Size: {}".format(searcher.needle.size)
-        if searcher.needle.size < 3:
-            print "WARNING: Needle size is small. Things may run slowly."
-        for address, row_id, types, values in searcher.find_records(address_space):
+        for address, row_id, types, values in self.searcher.find_records(address_space):
             yield address, row_id, types, values
 
     @property

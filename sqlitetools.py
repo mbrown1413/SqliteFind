@@ -577,13 +577,13 @@ Needle = namedtuple("Needle", "yara_rule size varint_offset byte_offset")
 
 class RowSearch(object):
 
-    def __init__(self, schema, needle=None):
+    def __init__(self, schema, needle=None, verbose=False):
         self.schema = schema
 
         if needle:
             self.needle = needle
         else:
-            self.needle = _get_search_needle(self.schema)
+            self.needle = _get_search_needle(self.schema, verbose)
 
     @property
     def n_cols(self):
@@ -606,8 +606,12 @@ class RowSearch(object):
             except SqliteParseError as e:
                 pass  # Match is not an actual record  :(
 
-def _get_search_needle(schema):
+def _get_search_needle(schema, verbose=False):
     type_sets = list(schema)
+
+    def verbose_print(string):
+        if verbose:
+            print string
 
     # Find start, length of needle
     # Our needle will be in the row header, but it can't overlap any string or
@@ -622,7 +626,10 @@ def _get_search_needle(schema):
     start, length = _longest_run(usable_cols)
 
     if start is None:
+        verbose_print("Could not use any field for needle.")
         return Needle(None, 0, 0, 0)
+    else:
+        verbose_print("Needle start={} length={}".format(start, length))
 
     # Build yara hex string
     hex_str = []
@@ -640,6 +647,8 @@ def _get_search_needle(schema):
 
     rule_str = "rule r1 {{ strings: $a = {{ {} }} condition: $a }}".format(hex_str)
     yara_rule = yara.compile(source=rule_str)
+
+    verbose_print("Yara Rule: "+rule_str)
 
     # Our search puts us `start` varints into the header. There are `start`+3
     # varints (row id, payload length, header length) to count back until we
