@@ -165,13 +165,13 @@ TYPES = (
         serial_types = None,
         serial_type_test = lambda stype: stype >= 12 and stype & 1 == 0,
         size_func = lambda stype: (stype-12) / 2,
-        decode_func = lambda stype, buf: buf
+        decode_func = lambda stype, buf: buf.encode('string_escape')
     ),
     Type("string", "text", "longvarchar", "varchar", "varchar(*)",
         serial_types = None,
         serial_type_test = lambda stype: stype >= 13 and stype & 1 == 1,
         size_func = lambda stype: (stype-13) / 2,
-        decode_func = lambda stype, buf: buf  #TODO: Encodings?
+        decode_func = lambda stype, buf: buf.encode('string_escape')
     ),
     Type("reserved",
         serial_types = (10, 11),
