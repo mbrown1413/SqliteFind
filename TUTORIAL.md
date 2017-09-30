@@ -1,13 +1,15 @@
 
 
-Gathering Data
-==============
+Data Files
+==========
 
-Data files: ([Download here](https://msbrown.net/sqlitefind/))
-  * `firefox.img` - Memory snapshot
-  * `firefox_places.sqlite` - Places database
+Download the data files:
 
-Here are the steps taken to generate the data files:
+  * [firefox.img](https://msbrown.net/sqlitefind/data/firefox.img) - Memory snapshot
+  * [firefox_places.sqlite](https://msbrown.net/sqlitefind/data/firefox_places.sqlite) - Places database
+
+In case you want to reproduce this, here are the steps taken to generate
+the data files:
 
   1. Boot an Ubuntu VM.
   2. Open firefox and go to "example.com".
@@ -61,7 +63,7 @@ For each table found, the output contains:
             firefox tables we're interested in.
   * `Needle Size`: How many bytes the search string will be if we want to find
             this column. Usually, the larger it is, the faster the search will
-            be, but the needle value matters too, as we'll see later.
+            be, but the value of the needle matters too, as we'll see later.
   * `Column Type String`: The name and possible types for each column. Each
             column is separated by semicolons, and each column contains
             `<name>:<type list>`.
@@ -70,7 +72,8 @@ For each table found, the output contains:
 Finding Table Rows
 ==================
 
-We'll see if we can recover the `moz_places` table:
+We'll see if we can recover the `moz_places` table using the `sqlitefind`
+command. We'll use `--output=csv` because it's easier to read the output:
 
     $ python vol.py -f firefox.img sqlitefind -t moz_places --output=csv
     Needle Size: 6
@@ -99,7 +102,9 @@ We'll see if we can recover the `moz_places` table:
     "18","https://news.ycombinator.com/","Hacker News","moc.rotanibmocy.swen.","1","0","0","11","2000","1471970845483557","-yx4LJ_n$D\x00\x00"
     "1","http://www.mozilla.z\x13\xe9\xec\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00b\xa4n3\x00\x00\x00\x00\xd7\xfd","None","\xfb#\xbbK\x02g\xa0\xa0\x0e\x96\x0e""\x8d\xf5\xaf\xcc","0","0","0","None","-26731","None","\x00\x00\x00\x00w\x93\xdb\xe0\x00\x00\x00\x00"
 
-We've used `--output=csv` because it's easier to read in csv form.
+Success! We got some useful data. But there's something off about it,
+especially the last row. It looks pretty similar to another row, but then
+turns to garbage data, with non-printable characters.
 
 
 Dealing with Duplicates
@@ -112,7 +117,8 @@ non-printable characters in it, but the other duplicates look completely
 normal.
 
 These appear to be memory artifacts, but how do we tell the real for the fake?
-Let's have `sqlitefind` output the memory address for each row also:
+Let's have `sqlitefind` output the memory address for each row also, using the
+`--output-cols` option:
 
     $ python vol.py -f firefox.img sqlitefind -t moz_places --output=csv --output-cols=address,values
     Needle Size: 6
@@ -179,10 +185,13 @@ Fortunately, we can can tweak things. If you look at the output of
 
     id:primarykey; from_visit:int,null; place_id:int,null; visit_date:int,null; visit_type:int,null; session:int,null
 
-Although the table definition allows NULL for most fields, in practice most
+This schema string has database columns separated by a semicolon. Each
+column has a name, and a list of types that the column might contain.
+
+Although this table definition allows NULL for most fields, in practice most
 rows won't have NULL. Of course, this depends on the particular table you're
-looking for, but we can at least try taking away NULL as a possibility. Here's
-our new table schema:
+looking for, but we can at least try taking away NULL to see if it helps.
+Here's our new table schema:
 
     id:primarykey; from_visit:int,null; place_id:int,null; visit_date:int,null; visit_type:int,null; session:int,null
 
