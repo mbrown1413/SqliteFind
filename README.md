@@ -73,8 +73,6 @@ as the column name. You can use the following types:
   * `int<n bits>` - `<n bits>` must be one of 8, 16, 24, 32, 48, 64
   * `float`
   * `string` / `blob`
-  * `string<length>` / `blob<length>` - Like "blob" or "string" but with a
-                                       following integer specifying the length.
   * `timestamp` - Same as `int64`.
   * `<serial type>` - A serial type number as defined by the [Sqlite file
                     format](https://www.sqlite.org/fileformat2.html#record_format).

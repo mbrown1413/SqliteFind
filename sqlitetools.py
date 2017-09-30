@@ -104,6 +104,10 @@ class Type(object):
         for name in self.names:
             if s == name:
                 return True
+        if self.names[0] == "string" and s.startswith("varchar"):
+            return True
+        if self.names[0] == "blob" and s.startswith("blob"):
+            return True
         return False
 
     def __repr__(self):
@@ -124,6 +128,7 @@ class Type(object):
         for t in TYPES:
             if t.matches_str(s):
                 return t
+        raise ValueError('Unrecognized type in schema: "{}"'.format(s))
 
 def _reserved_stype_error(*args):
     raise SqliteParseError("Reserved stype used")
@@ -167,7 +172,7 @@ TYPES = (
         size_func = lambda stype: (stype-12) / 2,
         decode_func = lambda stype, buf: buf.encode('string_escape')
     ),
-    Type("string", "text", "longvarchar", "varchar", "varchar(*)",
+    Type("string", "text", "longvarchar", "varchar",
         serial_types = None,
         serial_type_test = lambda stype: stype >= 13 and stype & 1 == 1,
         size_func = lambda stype: (stype-13) / 2,
@@ -305,8 +310,9 @@ class TableSchema(object):
                 raise SqlParsingError(sql, "Not enough words for a column name and type")
             names.append(words[0])
             type_str = words[1].lower()
-            t = Type.from_str(type_str)
-            if not t:
+            try:
+                t = Type.from_str(type_str)
+            except ValueError:
                 raise SqlParsingError(sql, 'Unrecognized SQL type: "{}"'.format(type_str))
             type_set = set([t])
             if "NOT NULL" not in col_str:
