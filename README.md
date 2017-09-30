@@ -1,8 +1,8 @@
 
-SqliteFind is a Volatility plugin for finding sqlite database rows.
+SqliteFind is a Volatility plugin for finding sqlite database rows. It can automatically find database schemas in `sqlite_master` tables, and recover database rows from memory.
 
-[Tutorial](TUTORIAL.md)
-[How it works](HOW_IT_WORKS.md)
+  * [Tutorial](TUTORIAL.md)
+  * [How it works](HOW_IT_WORKS.md)
 
 
 Installing
@@ -29,9 +29,12 @@ Recover table rows:
 
 For a guided tour, see the [Tutorial](TUTORIAL.md).
 
+See below for the common options, or use `--help` for a complete list of
+options.
 
-sqlitefindtables
-================
+
+sqlitefindtables Command
+========================
 
 Searches for an `sqlite_master` table and shows the schemas found in them.
 
@@ -40,8 +43,8 @@ Searches for an `sqlite_master` table and shows the schemas found in them.
 Use `-R`/`--raw-sql` to output the schema in raw SQL.
 
 
-sqlitefind
-==========
+sqlitefind Command
+==================
 
 Searches for database rows in memory, given the table schema. There are a few
 ways to specify the schema. You can specify the table name, in which case the
@@ -73,7 +76,7 @@ as the column name. You can use the following types:
   * `string<length>` / `blob<length>` - Like "blob" or "string" but with a
                                        following integer specifying the length.
   * `timestamp` - Same as `int64`.
-  * `<serial type>` - A serial type as defined by the [Sqlite file
+  * `<serial type>` - A serial type number as defined by the [Sqlite file
                     format](https://www.sqlite.org/fileformat2.html#record_format).
 
 One thing to notice is that **NULL is not allowed by default**. Make sure to
@@ -86,10 +89,10 @@ Output Format
 You can include different values in the output using the "-O" option, which is
 a comma separated list of:
 
-  * `"values"` - A field for each sqlite column.
-  * `"all_values"` - One field that is a list of every sqlite column.
-  * `"address"` - Address the sqlite row was found in memory.
-  * `"all_types"` - A list of types for each column in this row. Each type will
+  * `values` - A field for each sqlite column.
+  * `all_values` - One field that is a list of every sqlite column.
+  * `address` - Address the sqlite row was found in memory.
+  * `all_types` - A list of types for each column in this row. Each type will
                   be an integer serial type.
 
 For example, to show the memory address of the row followed by the values:
@@ -98,19 +101,12 @@ For example, to show the memory address of the row followed by the values:
                  -c "int,null; string; bool" \
                  -O "address,all_values"
 
-If you try the above, the field names will be something like "Col1", "Col2",
-"Col3". You can specify your own names by putting "<name>:" before the types
-specified in "-c":
-
-    $ volatility --profile=<profile> -f <memory file> sqlitefind \
-                 -c "id:int,null; col1:int,string; col2:bool"
-
 CSV output is also supported, using "--output=csv":
 
-    $ volatility --profile=<profile> -f <memory file> sqlitefind \
+    $ volatility -f <memory file> sqlitefind \
                  -c "id:int,null; field1:string; field2:bool" \
                  -O "address,values" \
-                 --output=csv --output-file=cookies.csv
+                 --output=csv --output-file=data.csv
 
 
 Limitations
@@ -137,7 +133,7 @@ About
 =====
 
 Written by Michael Brown as a project for the Computer Forensics class taught
-by Fabian Monrose at the University of North Carolina Chapel Hill.
+by Fabian Monrose at the University of North Carolina Chapel Hill. Feel free to contact me at [michael@msbrown.net](mailto:michael@msbrown.net), or start an issue on [GitHub](https://github.com/mbrown1413/SqliteFind).
 
 The idea of searching for sqlite database rows in memory is based on Dave
 Lassalle's (@superponible) [firefox volatility
