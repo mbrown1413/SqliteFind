@@ -2,8 +2,7 @@
 How it Works
 ============
 
-When you specify the column types using `-c`, it searches for a section of the
-row header that matches those types.
+Given a schema, it sqlitefind searches for a section of the row header that matches those types. The steps are:
 
   1. Build needle - Based on column types given, figure out what to search for.
   2. Search memory - Finds all instances of needle in memory.
@@ -65,8 +64,9 @@ Search Memory
 
 A yara rule is compiled for the needle so searching can be done quickly. The
 address space is broken into blocks and yara is called for each. There may be
-many matches of our needle that do not actually correspond to a row, but that
-is handled in the next step.
+many matches of our needle that do not actually correspond to a row. False
+positives are (mostly) removed in the next step, but the number of yara matches
+greatly affects how fast the search is.
 
 Parse Row
 ---------
