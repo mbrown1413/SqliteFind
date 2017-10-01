@@ -5,7 +5,7 @@ Data Files
 
 Download the data files:
 
-  * [firefox.img](https://msbrown.net/sqlitefind/data/firefox.img) - Memory snapshot
+  * [firefox.img](https://msbrown.net/sqlitefind/data/firefox.img.zip) - Memory snapshot
   * [firefox_places.sqlite](https://msbrown.net/sqlitefind/data/firefox_places.sqlite) - Places database
 
 In case you want to reproduce this, here are the steps taken to generate
