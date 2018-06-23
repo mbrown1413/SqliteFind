@@ -4,7 +4,7 @@ database rows.
 
 Data files are in the `data/` directory. The large files like memory dumps and
 databases are not in the repository. **You can download the large files
-[here](https://msbrown.net/sqlitefind/).**
+[here](https://msbrown.net/projects/sqlitefind/).**
 
 Memory dumps were accomplished using virsh dump:
 

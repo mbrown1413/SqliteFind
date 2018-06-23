@@ -3,10 +3,10 @@
 Data Files
 ==========
 
-Download the data files:
+Download the data files ([download here](https://msbrown.net/projects/sqlitefind/)):
 
-  * [firefox.img](https://msbrown.net/sqlitefind/data/firefox.img.zip) - Memory snapshot
-  * [firefox_places.sqlite](https://msbrown.net/sqlitefind/data/firefox_places.sqlite) - Places database
+  * `firefox.img` - Memory snapshot
+  * `firefox_places.sqlite` - Places database
 
 In case you want to reproduce this, here are the steps taken to generate
 the data files:
